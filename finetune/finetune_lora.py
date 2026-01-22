@@ -640,7 +640,8 @@ class GlmImageLoraTrainer:
             all_labels.append(labels)
             all_attention_masks.append(attn_mask)
         
-        # Pad sequences to same length
+        # Pad sequences to same length (LEFT PADDING for causal LM)
+        # GLM-Image uses left padding so all sequences end at the same position
         max_len = max(len(ids) for ids in all_input_ids)
         
         padded_input_ids = torch.full((batch_size, max_len), pad_token_id, device=device, dtype=torch.long)
@@ -649,9 +650,10 @@ class GlmImageLoraTrainer:
         
         for i in range(batch_size):
             seq_len = len(all_input_ids[i])
-            padded_input_ids[i, :seq_len] = all_input_ids[i]
-            padded_labels[i, :seq_len] = all_labels[i]
-            padded_attention_mask[i, :seq_len] = all_attention_masks[i]
+            # Left padding: place content at the end, padding at the beginning
+            padded_input_ids[i, -seq_len:] = all_input_ids[i]
+            padded_labels[i, -seq_len:] = all_labels[i]
+            padded_attention_mask[i, -seq_len:] = all_attention_masks[i]
         
         # ================================================================
         # Step 3: Forward pass and compute loss
