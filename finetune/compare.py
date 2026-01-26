@@ -67,7 +67,6 @@ def load_pipeline(model_path: str, lora_path: Optional[str] = None, device: str 
         model_path,
         torch_dtype=torch.bfloat16,
     )
-    pipe = pipe.to(device)
     
     if lora_path:
         logging.info(f"Loading LoRA weights from {lora_path}")
@@ -78,7 +77,13 @@ def load_pipeline(model_path: str, lora_path: Optional[str] = None, device: str 
             pipe.vision_language_encoder,
             lora_path,
         )
-        pipe.vision_language_encoder = pipe.vision_language_encoder.to(device)
+        
+        # IMPORTANT: Merge LoRA weights and unload for correct inference
+        # This ensures the model behaves correctly during generation
+        logging.info("Merging LoRA weights into base model...")
+        pipe.vision_language_encoder = pipe.vision_language_encoder.merge_and_unload()
+    
+    pipe = pipe.to(device)
     
     return pipe
 
