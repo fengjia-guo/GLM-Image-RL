@@ -637,27 +637,31 @@ class GlmImageLoraTrainer:
                 total_tokens += h * w
             tokens_per_sample.append(total_tokens)
         
-        # For T2I, we need to interleave large and small tokens per sample
+        # For T2I, we need to interleave small and large tokens per sample
+        # CRITICAL: GLM-Image generates tokens in order: [small] → [large] → [EOS]
+        # This matches pipeline's _extract_large_image_tokens which uses offset=small_tokens
+        # 
         # Currently target_image_tokens is [all_large_tokens, all_small_tokens]
-        # We need to reorder to [sample0_large, sample0_small, sample1_large, sample1_small, ...]
+        # We need to reorder to [sample0_small, sample0_large, sample1_small, sample1_large, ...]
         if is_t2i:
             reordered_tokens = []
             large_offset = 0
             small_offset = len(large_image_tokens)
             for i in range(batch_size):
-                # Large tokens for sample i
-                large_h = image_grid_thw[i * 2, 1].item()
-                large_w = image_grid_thw[i * 2, 2].item()
-                num_large = large_h * large_w
-                reordered_tokens.append(target_image_tokens[large_offset:large_offset + num_large])
-                large_offset += num_large
-                
+                # IMPORTANT: Small tokens come FIRST in generation order!
                 # Small tokens for sample i
                 small_h = image_grid_thw[i * 2 + 1, 1].item()
                 small_w = image_grid_thw[i * 2 + 1, 2].item()
                 num_small = small_h * small_w
                 reordered_tokens.append(target_image_tokens[small_offset:small_offset + num_small])
                 small_offset += num_small
+                
+                # Large tokens for sample i (come after small)
+                large_h = image_grid_thw[i * 2, 1].item()
+                large_w = image_grid_thw[i * 2, 2].item()
+                num_large = large_h * large_w
+                reordered_tokens.append(target_image_tokens[large_offset:large_offset + num_large])
+                large_offset += num_large
             target_image_tokens = torch.cat(reordered_tokens, dim=0)
         
         # Build full sequence: [text] <image_start> [image_tokens] <image_end>
@@ -765,7 +769,15 @@ class GlmImageLoraTrainer:
                 curr_pos += 1
                 
                 # 3. Image tokens - iterate through all grids for this sample
-                for g in range(grids_per_sample):
+                # CRITICAL: For T2I, generation order is [small] → [large] 
+                # but image_grid_thw is [large, small] per sample
+                # So we need to process grids in reverse order for T2I
+                if is_t2i:
+                    grid_indices = list(reversed(range(grids_per_sample)))
+                else:
+                    grid_indices = list(range(grids_per_sample))
+                
+                for g in grid_indices:
                     grid_idx = grid_offset + g
                     t, h, w = image_grid_thw[grid_idx].tolist()
                     num_tokens = t * h * w
