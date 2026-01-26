@@ -807,33 +807,35 @@ class GlmImageLoraTrainer:
         # Now we pass manually computed position_ids to bypass get_rope_index
         # which doesn't handle training scenarios with all image tokens present
         
+        # NOTE: Do NOT pass labels to model.forward() because:
+        # The model's loss_function uses text_config.vocab_size (168064)
+        # but lm_head outputs vision_vocab_size (16512), causing shape mismatch.
+        # We compute loss manually with correct vocab_size.
+        
         outputs = self.model(
             input_ids=padded_input_ids,
             attention_mask=padded_attention_mask,
             position_ids=position_ids,
             image_grid_thw=image_grid_thw,
             images_per_sample=torch.full((batch_size,), grids_per_sample, dtype=torch.long, device=device),
-            labels=padded_labels,
+            # labels=padded_labels,  # Don't pass labels - compute loss manually
         )
         
-        # If loss is None, compute it manually
-        if outputs.loss is None:
-            # Shift logits and labels for causal LM loss
-            # logits: [B, seq_len, vision_vocab_size]
-            # labels: [B, seq_len]
-            logits = outputs.logits
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = padded_labels[..., 1:].contiguous()
-            
-            # Compute cross-entropy loss
-            loss = F.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1),
-                ignore_index=-100,
-            )
-            return loss
+        # Compute loss manually with correct vision_vocab_size
+        # Shift logits and labels for causal LM loss
+        # logits: [B, seq_len, vision_vocab_size=16512]
+        # labels: [B, seq_len]
+        logits = outputs.logits
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = padded_labels[..., 1:].contiguous()
         
-        return outputs.loss
+        # Compute cross-entropy loss
+        loss = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+            ignore_index=-100,
+        )
+        return loss
     
     def train(self):
         """Main training loop."""
