@@ -1,0 +1,411 @@
+#!/usr/bin/env python3
+"""
+GLM-Image LoRA Comparison Tool
+
+Compare image generation results between:
+1. Base model (without LoRA)
+2. LoRA-finetuned model (from checkpoint)
+
+This helps evaluate training progress and quality improvements.
+
+Usage:
+    # Compare single prompt
+    python compare.py \
+        --model_path /path/to/GLM-Image \
+        --lora_path ./outputs/glm-image-lora/checkpoint-1000 \
+        --prompt "A cat sitting on a windowsill"
+
+    # Compare multiple prompts from file
+    python compare.py \
+        --model_path /path/to/GLM-Image \
+        --lora_path ./outputs/glm-image-lora/checkpoint-1000 \
+        --prompt_file prompts.txt \
+        --output_dir ./comparison_results
+
+    # Compare multiple checkpoints
+    python compare.py \
+        --model_path /path/to/GLM-Image \
+        --lora_paths checkpoint-500 checkpoint-1000 checkpoint-2000 \
+        --prompt "A beautiful sunset over the ocean"
+"""
+
+import os
+import sys
+import argparse
+import logging
+from pathlib import Path
+from typing import List, Optional, Union
+from datetime import datetime
+
+import torch
+from PIL import Image, ImageDraw, ImageFont
+
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.INFO,
+)
+
+
+def load_pipeline(model_path: str, lora_path: Optional[str] = None, device: str = "cuda"):
+    """
+    Load GLM-Image pipeline with optional LoRA weights.
+    
+    Args:
+        model_path: Path to base GLM-Image model
+        lora_path: Optional path to LoRA checkpoint
+        device: Device to load model on
+    
+    Returns:
+        GlmImagePipeline with or without LoRA
+    """
+    from diffusers import GlmImagePipeline
+    
+    logging.info(f"Loading pipeline from {model_path}")
+    
+    pipe = GlmImagePipeline.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16,
+    )
+    pipe = pipe.to(device)
+    
+    if lora_path:
+        logging.info(f"Loading LoRA weights from {lora_path}")
+        from peft import PeftModel
+        
+        # Load LoRA into the vision_language_encoder
+        pipe.vision_language_encoder = PeftModel.from_pretrained(
+            pipe.vision_language_encoder,
+            lora_path,
+        )
+        pipe.vision_language_encoder = pipe.vision_language_encoder.to(device)
+    
+    return pipe
+
+
+def generate_image(
+    pipe,
+    prompt: str,
+    height: int = 1024,
+    width: int = 1024,
+    num_inference_steps: int = 50,
+    guidance_scale: float = 1.5,
+    seed: Optional[int] = None,
+) -> Image.Image:
+    """Generate a single image."""
+    generator = None
+    if seed is not None:
+        generator = torch.Generator(device=pipe.device).manual_seed(seed)
+    
+    result = pipe(
+        prompt=prompt,
+        height=height,
+        width=width,
+        num_inference_steps=num_inference_steps,
+        guidance_scale=guidance_scale,
+        generator=generator,
+    )
+    
+    return result.images[0]
+
+
+def create_comparison_grid(
+    images: List[Image.Image],
+    labels: List[str],
+    prompt: str,
+    max_label_width: int = 200,
+) -> Image.Image:
+    """
+    Create a side-by-side comparison grid with labels.
+    
+    Args:
+        images: List of images to compare
+        labels: Labels for each image (e.g., "Base", "LoRA-1000")
+        prompt: The prompt used for generation
+        max_label_width: Maximum width for label text
+    
+    Returns:
+        Combined comparison image
+    """
+    if not images:
+        raise ValueError("No images provided")
+    
+    n_images = len(images)
+    img_width, img_height = images[0].size
+    
+    # Layout parameters
+    padding = 20
+    label_height = 40
+    prompt_height = 60
+    
+    # Calculate grid dimensions
+    total_width = n_images * img_width + (n_images + 1) * padding
+    total_height = img_height + label_height + prompt_height + 3 * padding
+    
+    # Create canvas
+    canvas = Image.new("RGB", (total_width, total_height), color=(255, 255, 255))
+    draw = ImageDraw.Draw(canvas)
+    
+    # Try to load a nice font, fall back to default
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 16)
+        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
+    except:
+        try:
+            font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 16)
+            font_small = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 12)
+        except:
+            font = ImageFont.load_default()
+            font_small = font
+    
+    # Draw prompt at top
+    prompt_text = f"Prompt: {prompt}"
+    if len(prompt_text) > 100:
+        prompt_text = prompt_text[:97] + "..."
+    draw.text((padding, padding), prompt_text, fill=(0, 0, 0), font=font)
+    
+    # Draw images and labels
+    y_offset = prompt_height + padding
+    for i, (img, label) in enumerate(zip(images, labels)):
+        x_offset = padding + i * (img_width + padding)
+        
+        # Paste image
+        canvas.paste(img, (x_offset, y_offset + label_height))
+        
+        # Draw label above image
+        label_x = x_offset + img_width // 2
+        draw.text((label_x, y_offset), label, fill=(0, 0, 0), font=font, anchor="mt")
+    
+    return canvas
+
+
+def compare_single_prompt(
+    model_path: str,
+    lora_paths: List[str],
+    prompt: str,
+    output_path: str,
+    height: int = 1024,
+    width: int = 1024,
+    num_inference_steps: int = 50,
+    guidance_scale: float = 1.5,
+    seed: int = 42,
+    include_base: bool = True,
+    device: str = "cuda",
+):
+    """
+    Generate comparison images for a single prompt.
+    
+    Args:
+        model_path: Path to base model
+        lora_paths: List of LoRA checkpoint paths
+        prompt: Text prompt
+        output_path: Path to save comparison image
+        include_base: Whether to include base model (no LoRA) in comparison
+    """
+    images = []
+    labels = []
+    
+    # Generate with base model
+    if include_base:
+        logging.info("Generating with base model...")
+        pipe = load_pipeline(model_path, lora_path=None, device=device)
+        img = generate_image(
+            pipe, prompt, height, width, num_inference_steps, guidance_scale, seed
+        )
+        images.append(img)
+        labels.append("Base Model")
+        
+        # Clear memory
+        del pipe
+        torch.cuda.empty_cache()
+    
+    # Generate with each LoRA checkpoint
+    for lora_path in lora_paths:
+        checkpoint_name = Path(lora_path).name
+        logging.info(f"Generating with {checkpoint_name}...")
+        
+        pipe = load_pipeline(model_path, lora_path=lora_path, device=device)
+        img = generate_image(
+            pipe, prompt, height, width, num_inference_steps, guidance_scale, seed
+        )
+        images.append(img)
+        labels.append(checkpoint_name)
+        
+        # Clear memory
+        del pipe
+        torch.cuda.empty_cache()
+    
+    # Create comparison grid
+    logging.info("Creating comparison grid...")
+    comparison = create_comparison_grid(images, labels, prompt)
+    
+    # Save
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    comparison.save(output_path)
+    logging.info(f"Saved comparison to {output_path}")
+    
+    # Also save individual images
+    base_path = Path(output_path)
+    for img, label in zip(images, labels):
+        individual_path = base_path.parent / f"{base_path.stem}_{label.replace(' ', '_')}{base_path.suffix}"
+        img.save(individual_path)
+        logging.info(f"Saved {individual_path}")
+    
+    return comparison
+
+
+def compare_from_prompts_file(
+    model_path: str,
+    lora_paths: List[str],
+    prompts_file: str,
+    output_dir: str,
+    **kwargs,
+):
+    """
+    Generate comparisons for multiple prompts from a file.
+    
+    Args:
+        prompts_file: Path to file with one prompt per line
+        output_dir: Directory to save comparison images
+    """
+    with open(prompts_file, "r") as f:
+        prompts = [line.strip() for line in f if line.strip()]
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    for i, prompt in enumerate(prompts):
+        logging.info(f"\n{'='*50}")
+        logging.info(f"Processing prompt {i+1}/{len(prompts)}")
+        logging.info(f"Prompt: {prompt[:50]}...")
+        
+        output_path = os.path.join(output_dir, f"comparison_{i:03d}.png")
+        compare_single_prompt(
+            model_path=model_path,
+            lora_paths=lora_paths,
+            prompt=prompt,
+            output_path=output_path,
+            **kwargs,
+        )
+    
+    logging.info(f"\nAll comparisons saved to {output_dir}")
+
+
+def find_checkpoints(output_dir: str) -> List[str]:
+    """Find all checkpoint directories in output directory."""
+    checkpoints = []
+    output_path = Path(output_dir)
+    
+    if not output_path.exists():
+        return checkpoints
+    
+    for item in output_path.iterdir():
+        if item.is_dir() and (item.name.startswith("checkpoint-") or item.name.startswith("epoch-")):
+            # Check if it contains LoRA weights
+            if (item / "adapter_config.json").exists():
+                checkpoints.append(str(item))
+    
+    # Sort by step number
+    def get_step(path):
+        name = Path(path).name
+        if name.startswith("checkpoint-"):
+            return int(name.split("-")[1])
+        elif name.startswith("epoch-"):
+            return int(name.split("-")[1]) * 1000000  # Epochs come after steps
+        return 0
+    
+    checkpoints.sort(key=get_step)
+    return checkpoints
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Compare GLM-Image generation with and without LoRA",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    
+    # Model paths
+    parser.add_argument("--model_path", type=str, required=True,
+                        help="Path to base GLM-Image model")
+    parser.add_argument("--lora_path", type=str, default=None,
+                        help="Path to single LoRA checkpoint")
+    parser.add_argument("--lora_paths", nargs="+", default=None,
+                        help="Paths to multiple LoRA checkpoints for comparison")
+    parser.add_argument("--output_dir", type=str, default=None,
+                        help="LoRA output directory to auto-find checkpoints")
+    
+    # Prompts
+    parser.add_argument("--prompt", type=str, default=None,
+                        help="Single prompt to generate")
+    parser.add_argument("--prompt_file", type=str, default=None,
+                        help="File with prompts (one per line)")
+    
+    # Generation settings
+    parser.add_argument("--height", type=int, default=1024)
+    parser.add_argument("--width", type=int, default=1024)
+    parser.add_argument("--num_inference_steps", type=int, default=50)
+    parser.add_argument("--guidance_scale", type=float, default=1.5)
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducible generation")
+    
+    # Output
+    parser.add_argument("--save_dir", type=str, default="./comparisons",
+                        help="Directory to save comparison images")
+    parser.add_argument("--no_base", action="store_true",
+                        help="Don't include base model in comparison")
+    
+    # Device
+    parser.add_argument("--device", type=str, default="cuda")
+    
+    args = parser.parse_args()
+    
+    # Validate inputs
+    if not args.prompt and not args.prompt_file:
+        parser.error("Either --prompt or --prompt_file is required")
+    
+    # Collect LoRA paths
+    lora_paths = []
+    if args.lora_path:
+        lora_paths.append(args.lora_path)
+    if args.lora_paths:
+        lora_paths.extend(args.lora_paths)
+    if args.output_dir:
+        found = find_checkpoints(args.output_dir)
+        logging.info(f"Found {len(found)} checkpoints in {args.output_dir}")
+        lora_paths.extend(found)
+    
+    if not lora_paths:
+        logging.warning("No LoRA paths specified. Will only generate base model output.")
+    
+    # Generate comparisons
+    kwargs = {
+        "height": args.height,
+        "width": args.width,
+        "num_inference_steps": args.num_inference_steps,
+        "guidance_scale": args.guidance_scale,
+        "seed": args.seed,
+        "include_base": not args.no_base,
+        "device": args.device,
+    }
+    
+    if args.prompt_file:
+        compare_from_prompts_file(
+            model_path=args.model_path,
+            lora_paths=lora_paths,
+            prompts_file=args.prompt_file,
+            output_dir=args.save_dir,
+            **kwargs,
+        )
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join(args.save_dir, f"comparison_{timestamp}.png")
+        compare_single_prompt(
+            model_path=args.model_path,
+            lora_paths=lora_paths,
+            prompt=args.prompt,
+            output_path=output_path,
+            **kwargs,
+        )
+
+
+if __name__ == "__main__":
+    main()

@@ -449,6 +449,81 @@ If you encounter OOM (Out of Memory) errors:
 3. **Use bf16 mixed precision** (default): `--mixed_precision bf16`
 4. **Use 8-bit Adam**: `--use_8bit_adam` (requires bitsandbytes)
 
+## Monitoring & Visualization
+
+### Real-time Loss Plotting
+
+Monitor training progress with live loss curves:
+
+```bash
+# Start live monitoring (auto-refresh every 5 seconds)
+python plot_loss.py --log_dir ./outputs/glm-image-lora
+
+# Adjust refresh interval
+python plot_loss.py --log_dir ./outputs/glm-image-lora --refresh_interval 10
+
+# View current state without refresh
+python plot_loss.py --log_dir ./outputs/glm-image-lora --no_refresh
+
+# Export plot to file
+python plot_loss.py --log_dir ./outputs/glm-image-lora --export loss_curve.png
+
+# Adjust smoothing (higher = smoother curve)
+python plot_loss.py --log_dir ./outputs/glm-image-lora --smoothing 0.95
+```
+
+The plot shows:
+
+- **Raw loss** (light blue): Actual loss values per step
+- **Smoothed loss** (dark blue): Exponential moving average
+- **Learning rate**: Current LR schedule progress
+
+### Comparing Checkpoints
+
+Use `compare.py` to evaluate training progress by comparing generated images:
+
+```bash
+# Compare base model vs single checkpoint
+python compare.py \
+    --model_path /path/to/GLM-Image \
+    --lora_path ./outputs/glm-image-lora/checkpoint-1000 \
+    --prompt "A cat sitting on a windowsill" \
+    --seed 42
+
+# Compare multiple checkpoints
+python compare.py \
+    --model_path /path/to/GLM-Image \
+    --lora_paths checkpoint-500 checkpoint-1000 checkpoint-2000 \
+    --prompt "A beautiful sunset over the ocean"
+
+# Auto-find all checkpoints in output directory
+python compare.py \
+    --model_path /path/to/GLM-Image \
+    --output_dir ./outputs/glm-image-lora \
+    --prompt "A futuristic cityscape"
+
+# Compare with multiple prompts from file
+python compare.py \
+    --model_path /path/to/GLM-Image \
+    --lora_path ./outputs/glm-image-lora/checkpoint-1000 \
+    --prompt_file test_prompts.txt \
+    --save_dir ./comparison_results
+```
+
+Example `test_prompts.txt`:
+
+```
+A cat sitting on a windowsill
+A beautiful sunset over the ocean
+A futuristic cityscape at night
+Portrait of a woman with flowing hair
+```
+
+The comparison tool generates:
+
+- **Side-by-side comparison image**: All models in one grid
+- **Individual images**: Separate files for each model variant
+
 ## Quick Start
 
 > **Note**: Full implementation is under active development. The following shows the intended usage pattern.
