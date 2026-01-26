@@ -17,7 +17,7 @@ GLM-Image's architecture consists of two main components:
 
 - Project structure and directory setup
 - Core training script (`finetune_lora.py`)
-- Dataset utilities (`datasets.py`)
+- Dataset utilities (`data_loader.py`)
 - HQ dataset support (jackyhate/text-to-image-2M)
 - LoRA integration via PEFT library
 - Checkpoint saving and merging utilities
@@ -190,7 +190,23 @@ def create_small_image_tokens(large_tokens: torch.Tensor, H: int, W: int) -> tor
 
 ### Image-to-Image (I2I)
 
-Finetune on image transformation tasks with text guidance.
+Finetune on image transformation tasks with text guidance using **HQ-Edit** dataset.
+
+**Dataset**: [UCSC-VLAA/HQ-Edit](https://huggingface.co/datasets/UCSC-VLAA/HQ-Edit)
+
+- 197K+ high-quality instruction-based image editing pairs
+- Generated using GPT-4V and DALL-E 3
+- Contains: source image, target image, edit instruction, descriptions
+
+**Dataset Structure**:
+| Field | Description |
+|-------|-------------|
+| `input_image` | Source image before editing |
+| `output_image` | Target image after editing |
+| `edit` | Editing instruction (e.g., "Change the sky to sunset") |
+| `input` | Description of input image |
+| `output` | Description of output image |
+| `inverse_edit` | Reverse editing instruction |
 
 **Use Cases**:
 
@@ -198,6 +214,25 @@ Finetune on image transformation tasks with text guidance.
 - Image editing and inpainting
 - Subject-consistent generation
 - Identity-preserving transformations
+
+**Quick Usage**:
+
+```python
+from data_loader import DatasetConfig, HQEditDataset
+
+config = DatasetConfig(
+    task_type="i2i",
+    resolution=1024,
+    i2i_prompt_type="edit",  # or "output_description"
+)
+dataset = HQEditDataset(config)
+
+for sample in dataset.iterate():
+    print(f"Edit: {sample['edit_instruction']}")
+    print(f"Source shape: {sample['source_image'].shape}")
+    print(f"Target shape: {sample['target_image'].shape}")
+    break
+```
 
 ## Installation
 
@@ -252,7 +287,7 @@ We use the [jackyhate/text-to-image-2M](https://huggingface.co/datasets/jackyhat
 **Quick usage:**
 
 ```python
-from datasets import DatasetConfig, TextToImage2MDataset
+from data_loader import DatasetConfig, TextToImage2MDataset
 
 # Load 10K high-resolution dataset
 config = DatasetConfig(

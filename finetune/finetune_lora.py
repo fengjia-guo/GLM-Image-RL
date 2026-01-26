@@ -92,7 +92,7 @@ except ImportError:
     print("Warning: PEFT not installed. Run: pip install peft")
 
 # Local imports
-from datasets import DatasetConfig, get_dataset, create_dataloader
+from data_loader import DatasetConfig, get_dataset, create_dataloader
 
 
 # ============================================================================

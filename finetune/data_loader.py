@@ -3,11 +3,16 @@ Dataset utilities for GLM-Image finetuning.
 
 This module provides dataset loading and preprocessing for:
 - Text-to-Image (T2I) training using text-to-image-2M dataset
-- Image-to-Image (I2I) training (coming soon)
+- Image-to-Image (I2I) training using HQ-Edit dataset
 
-Dataset: jackyhate/text-to-image-2M
-- data_1024_10K: 10K high-quality 1024x1024 images with prompts (Flux-dev generated)
-- data_512_2M: 2M 512x512 images for larger-scale training
+Datasets:
+- T2I: jackyhate/text-to-image-2M
+  - data_1024_10K: 10K high-quality 1024x1024 images with prompts (Flux-dev generated)
+  - data_512_2M: 2M 512x512 images for larger-scale training
+  
+- I2I: UCSC-VLAA/HQ-Edit
+  - 197K+ high-quality instruction-based image editing pairs
+  - GPT-4V + DALL-E 3 generated dataset
 """
 
 import os
@@ -31,9 +36,9 @@ except ImportError:
 class DatasetConfig:
     """Configuration for dataset loading and preprocessing."""
     
-    # Dataset source
-    dataset_name: str = "jackyhate/text-to-image-2M"
-    subset: str = "data_1024_10K"  # "data_1024_10K" or "data_512_2M"
+    # Dataset source (auto-selected based on task_type if not specified)
+    dataset_name: str = ""  # Will be set based on task_type
+    subset: str = "data_1024_10K"  # T2I: "data_1024_10K" or "data_512_2M"
     
     # Image processing
     resolution: int = 1024
@@ -41,7 +46,7 @@ class DatasetConfig:
     random_flip: bool = True
     
     # Data loading
-    streaming: bool = True
+    streaming: bool = False  # HQ-Edit doesn't support streaming well
     cache_dir: Optional[str] = None
     num_workers: int = 4
     prefetch_factor: int = 2
@@ -52,6 +57,9 @@ class DatasetConfig:
     # Prompt processing
     max_prompt_length: int = 512
     add_prompt_prefix: str = ""  # Optional prefix for all prompts
+    
+    # I2I specific: use edit instruction or output description as prompt
+    i2i_prompt_type: str = "edit"  # "edit" or "output_description"
     
     # For custom local datasets
     local_data_dir: Optional[str] = None
@@ -456,6 +464,172 @@ class LocalI2IDataset(Dataset):
         return T.Compose(transforms)(image)
 
 
+class HQEditDataset(Dataset):
+    """
+    Dataset wrapper for UCSC-VLAA/HQ-Edit.
+    
+    HQ-Edit is a high-quality instruction-based image editing dataset with 197K+ edits.
+    Generated using GPT-4V and DALL-E 3.
+    
+    Dataset structure:
+    - input_image: source image
+    - output_image: target/edited image
+    - edit: editing instruction (e.g., "Change the sky to sunset")
+    - input: description of input image
+    - output: description of output image
+    - inverse_edit: reverse editing instruction
+    
+    Args:
+        config: DatasetConfig with dataset parameters
+        transform: Optional image transform function
+        tokenizer: Optional tokenizer for text processing
+        split: Dataset split ("train" by default)
+    """
+    
+    def __init__(
+        self,
+        config: DatasetConfig,
+        transform: Optional[Callable] = None,
+        tokenizer: Optional[Any] = None,
+        split: str = "train",
+    ):
+        self.config = config
+        self.transform = transform
+        self.tokenizer = tokenizer
+        self.split = split
+        
+        if not HF_DATASETS_AVAILABLE:
+            raise ImportError(
+                "The 'datasets' library is required. "
+                "Install it with: pip install datasets"
+            )
+        
+        self._load_dataset()
+    
+    def _load_dataset(self):
+        """Load the HQ-Edit dataset from HuggingFace Hub."""
+        self.dataset = load_dataset(
+            "UCSC-VLAA/HQ-Edit",
+            split=self.split,
+            cache_dir=self.config.cache_dir,
+        )
+        
+        print(f"Loaded HQ-Edit dataset with {len(self.dataset)} samples")
+    
+    def __len__(self) -> int:
+        return len(self.dataset)
+    
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        sample = self.dataset[idx]
+        return self._process_sample(sample)
+    
+    def _process_sample(self, sample: Dict[str, Any]) -> Dict[str, Any]:
+        """Process a single sample from the dataset."""
+        # Extract images
+        source_image = sample["input_image"]
+        target_image = sample["output_image"]
+        
+        # Ensure PIL Image format
+        if not isinstance(source_image, Image.Image):
+            source_image = Image.open(source_image).convert("RGB")
+        else:
+            source_image = source_image.convert("RGB")
+            
+        if not isinstance(target_image, Image.Image):
+            target_image = Image.open(target_image).convert("RGB")
+        else:
+            target_image = target_image.convert("RGB")
+        
+        # Apply transforms
+        if self.transform:
+            source_image = self.transform(source_image)
+            target_image = self.transform(target_image)
+        else:
+            source_image = self._default_transform(source_image)
+            target_image = self._default_transform(target_image)
+        
+        # Select prompt based on config
+        if self.config.i2i_prompt_type == "edit":
+            # Use editing instruction: "Change the sky to sunset"
+            prompt = sample.get("edit", "")
+        elif self.config.i2i_prompt_type == "output_description":
+            # Use output description: "A landscape with a beautiful sunset sky"
+            prompt = sample.get("output", "")
+        else:
+            prompt = sample.get("edit", "")
+        
+        # Add optional prefix
+        if self.config.add_prompt_prefix:
+            prompt = f"{self.config.add_prompt_prefix} {prompt}"
+        
+        result = {
+            "source_image": source_image,
+            "target_image": target_image,  # This becomes "image" for training
+            "image": target_image,  # Alias for compatibility with T2I training flow
+            "prompt": prompt,
+            # Additional metadata
+            "input_description": sample.get("input", ""),
+            "output_description": sample.get("output", ""),
+            "edit_instruction": sample.get("edit", ""),
+            "inverse_edit": sample.get("inverse_edit", ""),
+        }
+        
+        # Tokenize if tokenizer provided
+        if self.tokenizer:
+            tokens = self.tokenizer(
+                prompt,
+                max_length=self.config.max_prompt_length,
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
+            )
+            result["input_ids"] = tokens["input_ids"].squeeze(0)
+            result["attention_mask"] = tokens["attention_mask"].squeeze(0)
+        
+        return result
+    
+    def _default_transform(self, image: Image.Image) -> torch.Tensor:
+        """Default image transformation."""
+        import torchvision.transforms as T
+        
+        transforms_list = []
+        
+        # Resize
+        if self.config.center_crop:
+            transforms_list.extend([
+                T.Resize(self.config.resolution, interpolation=T.InterpolationMode.BILINEAR),
+                T.CenterCrop(self.config.resolution),
+            ])
+        else:
+            transforms_list.append(
+                T.Resize(
+                    (self.config.resolution, self.config.resolution),
+                    interpolation=T.InterpolationMode.BILINEAR
+                )
+            )
+        
+        # Note: No random flip for I2I to maintain source-target correspondence
+        
+        # To tensor and normalize
+        transforms_list.extend([
+            T.ToTensor(),
+            T.Normalize([0.5], [0.5]),  # Normalize to [-1, 1]
+        ])
+        
+        transform = T.Compose(transforms_list)
+        return transform(image)
+    
+    def iterate(self):
+        """
+        Iterate over the dataset.
+        
+        Yields:
+            Processed samples as dictionaries.
+        """
+        for idx in range(len(self)):
+            yield self[idx]
+
+
 def create_dataloader(
     dataset: Dataset,
     batch_size: int = 1,
@@ -561,10 +735,12 @@ def get_dataset(
                 transform=transform,
                 tokenizer=tokenizer,
             )
-        else:
-            raise NotImplementedError(
-                "I2I mode with HuggingFace datasets not yet implemented. "
-                "Please use local_data_dir with custom I2I dataset."
+        elif config.task_type == "i2i":
+            # Use HQ-Edit dataset for I2I
+            return HQEditDataset(
+                config=config,
+                transform=transform,
+                tokenizer=tokenizer,
             )
     
     raise ValueError(f"Unknown task_type: {config.task_type}")
@@ -579,17 +755,24 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="Test dataset loading")
     parser.add_argument(
+        "--task_type",
+        type=str,
+        default="t2i",
+        choices=["t2i", "i2i"],
+        help="Task type: t2i (text-to-image) or i2i (image-to-image)"
+    )
+    parser.add_argument(
         "--subset", 
         type=str, 
         default="data_1024_10K",
         choices=["data_1024_10K", "data_512_2M"],
-        help="Dataset subset to use"
+        help="Dataset subset to use (T2I only)"
     )
     parser.add_argument(
         "--streaming",
         action="store_true",
-        default=True,
-        help="Use streaming mode"
+        default=False,
+        help="Use streaming mode (T2I only)"
     )
     parser.add_argument(
         "--num_samples",
@@ -599,29 +782,58 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     
-    print(f"Loading dataset: jackyhate/text-to-image-2M ({args.subset})")
-    print(f"Streaming mode: {args.streaming}")
-    print("-" * 50)
-    
-    config = DatasetConfig(
-        subset=args.subset,
-        streaming=args.streaming,
-        resolution=1024 if args.subset == "data_1024_10K" else 512,
-    )
-    
-    dataset = TextToImage2MDataset(config)
-    
-    print(f"Dataset size (estimated): {len(dataset)}")
-    print("-" * 50)
-    
-    print(f"\nPreviewing {args.num_samples} samples:")
-    for i, sample in enumerate(dataset.iterate()):
-        if i >= args.num_samples:
-            break
+    if args.task_type == "t2i":
+        print(f"Loading T2I dataset: jackyhate/text-to-image-2M ({args.subset})")
+        print(f"Streaming mode: {args.streaming}")
+        print("-" * 50)
         
-        print(f"\nSample {i + 1}:")
-        print(f"  Image shape: {sample['image'].shape}")
-        print(f"  Prompt: {sample['prompt'][:100]}...")
+        config = DatasetConfig(
+            subset=args.subset,
+            streaming=args.streaming,
+            resolution=1024 if args.subset == "data_1024_10K" else 512,
+            task_type="t2i",
+        )
+        
+        dataset = TextToImage2MDataset(config)
+        
+        print(f"Dataset size (estimated): {len(dataset)}")
+        print("-" * 50)
+        
+        print(f"\nPreviewing {args.num_samples} samples:")
+        for i, sample in enumerate(dataset.iterate()):
+            if i >= args.num_samples:
+                break
+            
+            print(f"\nSample {i + 1}:")
+            print(f"  Image shape: {sample['image'].shape}")
+            print(f"  Prompt: {sample['prompt'][:100]}...")
+    
+    elif args.task_type == "i2i":
+        print("Loading I2I dataset: UCSC-VLAA/HQ-Edit")
+        print("-" * 50)
+        
+        config = DatasetConfig(
+            resolution=1024,
+            task_type="i2i",
+            i2i_prompt_type="edit",
+        )
+        
+        dataset = HQEditDataset(config)
+        
+        print(f"Dataset size: {len(dataset)}")
+        print("-" * 50)
+        
+        print(f"\nPreviewing {args.num_samples} samples:")
+        for i, sample in enumerate(dataset.iterate()):
+            if i >= args.num_samples:
+                break
+            
+            print(f"\nSample {i + 1}:")
+            print(f"  Source image shape: {sample['source_image'].shape}")
+            print(f"  Target image shape: {sample['target_image'].shape}")
+            print(f"  Edit instruction: {sample['edit_instruction'][:100]}...")
+            print(f"  Input description: {sample['input_description'][:80]}...")
+            print(f"  Output description: {sample['output_description'][:80]}...")
     
     print("\n" + "=" * 50)
     print("Dataset loading test completed successfully!")
