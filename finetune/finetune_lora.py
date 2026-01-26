@@ -180,25 +180,73 @@ def load_model_and_processor(config: TrainingConfig):
     """
     Load GLM-Image model and processor.
     
+    Supports two formats:
+    1. Transformers format: Single directory with model and processor
+    2. Diffusers pipeline format: Separate subdirectories
+       - vision_language_encoder/ (AR model)
+       - processor/ (processor config)
+    
     Returns:
         model: GlmImageForConditionalGeneration
         processor: GlmImageProcessor
     """
     from transformers import GlmImageForConditionalGeneration, AutoProcessor
+    import json
     
-    logging.info(f"Loading model from {config.model_path}...")
+    model_path = config.model_path
+    logging.info(f"Loading model from {model_path}...")
     
-    model = GlmImageForConditionalGeneration.from_pretrained(
-        config.model_path,
-        torch_dtype=config.dtype,
-        device_map=None,  # Let accelerator handle device placement
-        trust_remote_code=True,
-    )
+    # Detect format by checking for model_index.json (diffusers pipeline)
+    model_index_path = os.path.join(model_path, "model_index.json")
+    is_diffusers_format = os.path.exists(model_index_path)
     
-    processor = AutoProcessor.from_pretrained(
-        config.model_path,
-        trust_remote_code=True,
-    )
+    if is_diffusers_format:
+        logging.info("Detected diffusers pipeline format")
+        
+        # Load model from vision_language_encoder subdirectory
+        model_subdir = os.path.join(model_path, "vision_language_encoder")
+        if not os.path.exists(model_subdir):
+            raise FileNotFoundError(
+                f"vision_language_encoder not found in {model_path}. "
+                "Expected diffusers pipeline structure."
+            )
+        
+        logging.info(f"Loading AR model from {model_subdir}")
+        model = GlmImageForConditionalGeneration.from_pretrained(
+            model_subdir,
+            torch_dtype=config.dtype,
+            device_map=None,
+            trust_remote_code=True,
+        )
+        
+        # Load processor from processor subdirectory
+        processor_subdir = os.path.join(model_path, "processor")
+        if not os.path.exists(processor_subdir):
+            raise FileNotFoundError(
+                f"processor not found in {model_path}. "
+                "Expected diffusers pipeline structure."
+            )
+        
+        logging.info(f"Loading processor from {processor_subdir}")
+        processor = AutoProcessor.from_pretrained(
+            processor_subdir,
+            trust_remote_code=True,
+        )
+    else:
+        # Standard transformers format
+        logging.info("Using transformers format (single directory)")
+        
+        model = GlmImageForConditionalGeneration.from_pretrained(
+            model_path,
+            torch_dtype=config.dtype,
+            device_map=None,
+            trust_remote_code=True,
+        )
+        
+        processor = AutoProcessor.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+        )
     
     logging.info(f"Model loaded: {model.__class__.__name__}")
     logging.info(f"Model dtype: {config.dtype}")
@@ -841,8 +889,10 @@ def merge_lora_weights(
     """
     Merge LoRA weights into the base model and save.
     
+    Supports both transformers and diffusers pipeline formats.
+    
     Args:
-        base_model_path: Path to base GLM-Image model
+        base_model_path: Path to base GLM-Image model (or pipeline root)
         lora_path: Path to trained LoRA weights
         output_path: Path to save merged model
         torch_dtype: Data type for the merged model
@@ -850,25 +900,55 @@ def merge_lora_weights(
     from transformers import GlmImageForConditionalGeneration, AutoProcessor
     from peft import PeftModel
     
-    logging.info(f"Loading base model from {base_model_path}")
-    base_model = GlmImageForConditionalGeneration.from_pretrained(
-        base_model_path,
-        torch_dtype=torch_dtype,
-        device_map="auto",
-    )
+    # Detect format
+    model_index_path = os.path.join(base_model_path, "model_index.json")
+    is_diffusers_format = os.path.exists(model_index_path)
     
-    logging.info(f"Loading LoRA from {lora_path}")
-    model = PeftModel.from_pretrained(base_model, lora_path)
-    
-    logging.info("Merging weights...")
-    merged_model = model.merge_and_unload()
-    
-    logging.info(f"Saving merged model to {output_path}")
-    merged_model.save_pretrained(output_path)
-    
-    # Also save processor
-    processor = AutoProcessor.from_pretrained(base_model_path)
-    processor.save_pretrained(output_path)
+    if is_diffusers_format:
+        # Load from vision_language_encoder subdirectory
+        model_subdir = os.path.join(base_model_path, "vision_language_encoder")
+        processor_subdir = os.path.join(base_model_path, "processor")
+        
+        logging.info(f"Loading base AR model from {model_subdir}")
+        base_model = GlmImageForConditionalGeneration.from_pretrained(
+            model_subdir,
+            torch_dtype=torch_dtype,
+            device_map="auto",
+        )
+        
+        logging.info(f"Loading LoRA from {lora_path}")
+        model = PeftModel.from_pretrained(base_model, lora_path)
+        
+        logging.info("Merging weights...")
+        merged_model = model.merge_and_unload()
+        
+        logging.info(f"Saving merged model to {output_path}")
+        merged_model.save_pretrained(output_path)
+        
+        # Save processor
+        processor = AutoProcessor.from_pretrained(processor_subdir)
+        processor.save_pretrained(output_path)
+    else:
+        # Standard transformers format
+        logging.info(f"Loading base model from {base_model_path}")
+        base_model = GlmImageForConditionalGeneration.from_pretrained(
+            base_model_path,
+            torch_dtype=torch_dtype,
+            device_map="auto",
+        )
+        
+        logging.info(f"Loading LoRA from {lora_path}")
+        model = PeftModel.from_pretrained(base_model, lora_path)
+        
+        logging.info("Merging weights...")
+        merged_model = model.merge_and_unload()
+        
+        logging.info(f"Saving merged model to {output_path}")
+        merged_model.save_pretrained(output_path)
+        
+        # Also save processor
+        processor = AutoProcessor.from_pretrained(base_model_path)
+        processor.save_pretrained(output_path)
     
     logging.info("Done!")
 
