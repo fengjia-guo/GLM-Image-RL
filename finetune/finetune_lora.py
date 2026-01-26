@@ -538,7 +538,7 @@ class GlmImageLoraTrainer:
         # Encode through vision encoder + VQVAE to get discrete tokens
         with torch.no_grad():
             # Vision encoder
-            image_features = base_model.get_image_features(pixel_values, image_grid_thw)
+            image_features = base_model.get_image_features(pixel_values, image_grid_thw, return_dict=False)
             image_features = torch.cat(image_features, dim=0)
             
             # VQVAE quantization → discrete token indices
