@@ -19,6 +19,7 @@ import os
 import json
 from typing import Optional, Callable, Dict, Any, List, Tuple, Union
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -30,6 +31,10 @@ try:
 except ImportError:
     HF_DATASETS_AVAILABLE = False
     print("Warning: 'datasets' library not installed. Run: pip install datasets")
+
+
+# Default data directory for downloaded datasets
+DEFAULT_DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
 
 @dataclass
@@ -47,7 +52,7 @@ class DatasetConfig:
     
     # Data loading
     streaming: bool = False  # HQ-Edit doesn't support streaming well
-    cache_dir: Optional[str] = None
+    cache_dir: Optional[str] = None  # If None, uses DEFAULT_DATA_DIR
     num_workers: int = 4
     prefetch_factor: int = 2
     
@@ -64,6 +69,14 @@ class DatasetConfig:
     # For custom local datasets
     local_data_dir: Optional[str] = None
     metadata_file: str = "metadata.jsonl"
+    
+    def __post_init__(self):
+        """Set up cache directory after initialization."""
+        if self.cache_dir is None:
+            self.cache_dir = DEFAULT_DATA_DIR
+        
+        # Create cache directory if it doesn't exist
+        os.makedirs(self.cache_dir, exist_ok=True)
 
 
 class TextToImage2MDataset(Dataset):
@@ -780,19 +793,28 @@ if __name__ == "__main__":
         default=5,
         help="Number of samples to preview"
     )
+    parser.add_argument(
+        "--cache_dir",
+        type=str,
+        default=None,
+        help="Directory to cache downloaded datasets (default: finetune/data)"
+    )
     args = parser.parse_args()
     
     if args.task_type == "t2i":
         print(f"Loading T2I dataset: jackyhate/text-to-image-2M ({args.subset})")
         print(f"Streaming mode: {args.streaming}")
-        print("-" * 50)
         
         config = DatasetConfig(
             subset=args.subset,
             streaming=args.streaming,
             resolution=1024 if args.subset == "data_1024_10K" else 512,
             task_type="t2i",
+            cache_dir=args.cache_dir,
         )
+        
+        print(f"Cache directory: {config.cache_dir}")
+        print("-" * 50)
         
         dataset = TextToImage2MDataset(config)
         
@@ -810,13 +832,16 @@ if __name__ == "__main__":
     
     elif args.task_type == "i2i":
         print("Loading I2I dataset: UCSC-VLAA/HQ-Edit")
-        print("-" * 50)
         
         config = DatasetConfig(
             resolution=1024,
             task_type="i2i",
             i2i_prompt_type="edit",
+            cache_dir=args.cache_dir,
         )
+        
+        print(f"Cache directory: {config.cache_dir}")
+        print("-" * 50)
         
         dataset = HQEditDataset(config)
         

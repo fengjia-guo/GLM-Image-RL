@@ -290,10 +290,12 @@ We use the [jackyhate/text-to-image-2M](https://huggingface.co/datasets/jackyhat
 from data_loader import DatasetConfig, TextToImage2MDataset
 
 # Load 10K high-resolution dataset
+# Data will be cached to finetune/data/ by default
 config = DatasetConfig(
     subset="data_1024_10K",
     resolution=1024,
-    streaming=True,  # Recommended for large datasets
+    streaming=False,  # Set to True for streaming mode
+    cache_dir=None,  # Default: finetune/data/, or specify custom path
 )
 dataset = TextToImage2MDataset(config)
 
@@ -302,6 +304,21 @@ for sample in dataset.iterate():
     print(f"Prompt: {sample['prompt'][:100]}...")
     print(f"Image shape: {sample['image'].shape}")
     break
+```
+
+**Cache Management:**
+
+Downloaded datasets are cached in `finetune/data/` by default (not in system cache). This allows better control and cleanup:
+
+```bash
+# Check cache size
+du -sh finetune/data/
+
+# Clear cache to free disk space
+rm -rf finetune/data/
+
+# Specify custom cache location
+python finetune_lora.py --cache_dir /path/to/custom/cache
 ```
 
 ### Custom Local Dataset Format
