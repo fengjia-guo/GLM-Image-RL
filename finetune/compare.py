@@ -47,7 +47,7 @@ logging.basicConfig(
 )
 
 
-def load_pipeline(model_path: str, lora_path: Optional[str] = None, device: str = "cuda"):
+def load_pipeline(model_path: str, lora_path: Optional[str] = None, device: str = "cuda", merge_lora: bool = True):
     """
     Load GLM-Image pipeline with optional LoRA weights.
     
@@ -55,6 +55,7 @@ def load_pipeline(model_path: str, lora_path: Optional[str] = None, device: str 
         model_path: Path to base GLM-Image model
         lora_path: Optional path to LoRA checkpoint
         device: Device to load model on
+        merge_lora: Whether to merge LoRA weights (recommended for inference)
     
     Returns:
         GlmImagePipeline with or without LoRA
@@ -72,16 +73,30 @@ def load_pipeline(model_path: str, lora_path: Optional[str] = None, device: str 
         logging.info(f"Loading LoRA weights from {lora_path}")
         from peft import PeftModel
         
+        # Check adapter files exist
+        adapter_config = Path(lora_path) / "adapter_config.json"
+        if not adapter_config.exists():
+            raise FileNotFoundError(f"No adapter_config.json found in {lora_path}")
+        
+        # Load adapter config to verify
+        import json
+        with open(adapter_config) as f:
+            config = json.load(f)
+        logging.info(f"LoRA config: r={config.get('r')}, alpha={config.get('lora_alpha')}, "
+                     f"target_modules={config.get('target_modules')}")
+        
         # Load LoRA into the vision_language_encoder
         pipe.vision_language_encoder = PeftModel.from_pretrained(
             pipe.vision_language_encoder,
             lora_path,
         )
         
-        # IMPORTANT: Merge LoRA weights and unload for correct inference
-        # This ensures the model behaves correctly during generation
-        logging.info("Merging LoRA weights into base model...")
-        pipe.vision_language_encoder = pipe.vision_language_encoder.merge_and_unload()
+        if merge_lora:
+            # Merge LoRA weights and unload for correct inference
+            logging.info("Merging LoRA weights into base model...")
+            pipe.vision_language_encoder = pipe.vision_language_encoder.merge_and_unload()
+        else:
+            logging.info("Using LoRA in adapter mode (not merged)")
     
     pipe = pipe.to(device)
     
@@ -96,22 +111,28 @@ def generate_image(
     num_inference_steps: int = 50,
     guidance_scale: float = 1.5,
     seed: Optional[int] = None,
-) -> Image.Image:
-    """Generate a single image."""
+) -> Optional[Image.Image]:
+    """Generate a single image. Returns None if generation fails."""
     generator = None
     if seed is not None:
         generator = torch.Generator(device=pipe.device).manual_seed(seed)
     
-    result = pipe(
-        prompt=prompt,
-        height=height,
-        width=width,
-        num_inference_steps=num_inference_steps,
-        guidance_scale=guidance_scale,
-        generator=generator,
-    )
-    
-    return result.images[0]
+    try:
+        result = pipe(
+            prompt=prompt,
+            height=height,
+            width=width,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            generator=generator,
+        )
+        return result.images[0]
+    except RuntimeError as e:
+        logging.error(f"Generation failed: {e}")
+        logging.error("This may indicate the LoRA training has destabilized the model.")
+        logging.error("Try: 1) Using an earlier checkpoint, 2) Training with smaller learning rate, "
+                      "3) Using lower LoRA rank")
+        return None
 
 
 def create_comparison_grid(
@@ -229,16 +250,31 @@ def compare_single_prompt(
         checkpoint_name = Path(lora_path).name
         logging.info(f"Generating with {checkpoint_name}...")
         
-        pipe = load_pipeline(model_path, lora_path=lora_path, device=device)
-        img = generate_image(
-            pipe, prompt, height, width, num_inference_steps, guidance_scale, seed
-        )
-        images.append(img)
-        labels.append(checkpoint_name)
-        
-        # Clear memory
-        del pipe
-        torch.cuda.empty_cache()
+        try:
+            pipe = load_pipeline(model_path, lora_path=lora_path, device=device)
+            img = generate_image(
+                pipe, prompt, height, width, num_inference_steps, guidance_scale, seed
+            )
+            
+            if img is not None:
+                images.append(img)
+                labels.append(checkpoint_name)
+            else:
+                logging.warning(f"Skipping {checkpoint_name} due to generation failure")
+                # Create a placeholder image
+                placeholder = Image.new("RGB", (width, height), color=(200, 200, 200))
+                draw = ImageDraw.Draw(placeholder)
+                draw.text((width//2, height//2), f"{checkpoint_name}\nFailed", fill=(100, 100, 100), anchor="mm")
+                images.append(placeholder)
+                labels.append(f"{checkpoint_name} (FAILED)")
+        except Exception as e:
+            logging.error(f"Error loading {checkpoint_name}: {e}")
+            continue
+        finally:
+            # Clear memory
+            if 'pipe' in locals():
+                del pipe
+            torch.cuda.empty_cache()
     
     # Create comparison grid
     logging.info("Creating comparison grid...")
