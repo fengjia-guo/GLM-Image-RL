@@ -126,6 +126,7 @@ class TrainingConfig:
     resolution: int = 1024
     task_type: str = "t2i"  # "t2i" or "i2i"
     local_data_dir: Optional[str] = None
+    cache_dir: Optional[str] = None  # Default: finetune/data/
     
     # Training hyperparameters
     learning_rate: float = 1e-4
@@ -424,7 +425,10 @@ class GlmImageLoraTrainer:
             resolution=self.config.resolution,
             task_type=self.config.task_type,
             local_data_dir=self.config.local_data_dir,
+            cache_dir=self.config.cache_dir,  # Use cache_dir from training config
         )
+        
+        logging.info(f"Dataset cache directory: {dataset_config.cache_dir}")
         
         dataset = get_dataset(dataset_config)
         
@@ -704,22 +708,109 @@ class GlmImageLoraTrainer:
             padded_attention_mask[i, -seq_len:] = all_attention_masks[i]
         
         # ================================================================
+        # Step 2.5: Compute position_ids manually for 3D RoPE
+        # ================================================================
+        # The model's get_rope_index is designed for generation (incomplete images).
+        # For training, we have complete image tokens, so we compute position_ids manually.
+        # 
+        # Position_ids shape: [3, batch_size, seq_len] for (temporal, height, width)
+        # - Text tokens: sequential positions [0, 1, 2, ...]
+        # - Image tokens: 2D spatial encoding with position_temporal fixed, 
+        #                 position_height and position_width varying
+        
+        position_ids = torch.zeros(3, batch_size, max_len, dtype=torch.long, device=device)
+        
+        for i in range(batch_size):
+            valid_len = int(padded_attention_mask[i].sum().item())
+            start_idx = max_len - valid_len  # Due to left padding
+            
+            curr_pos = 0  # Current position counter
+            
+            # Get the unpadded sequence for this sample
+            curr_input_ids = all_input_ids[i]
+            
+            # Find image boundaries
+            image_start_positions = (curr_input_ids == image_start_token_id).nonzero(as_tuple=True)[0]
+            
+            # Build position_ids for each segment
+            temporal_list = []
+            height_list = []
+            width_list = []
+            
+            prev_end = 0
+            grid_offset = i * grids_per_sample  # Starting grid index for this sample
+            
+            if len(image_start_positions) > 0:
+                img_start = image_start_positions[0].item()
+                
+                # 1. Text tokens before <image_start>
+                text_len = img_start
+                text_pos = torch.arange(curr_pos, curr_pos + text_len, device=device)
+                temporal_list.append(text_pos)
+                height_list.append(text_pos)
+                width_list.append(text_pos)
+                curr_pos += text_len
+                
+                # 2. <image_start> token
+                temporal_list.append(torch.tensor([curr_pos], device=device))
+                height_list.append(torch.tensor([curr_pos], device=device))
+                width_list.append(torch.tensor([curr_pos], device=device))
+                curr_pos += 1
+                
+                # 3. Image tokens - iterate through all grids for this sample
+                for g in range(grids_per_sample):
+                    grid_idx = grid_offset + g
+                    t, h, w = image_grid_thw[grid_idx].tolist()
+                    num_tokens = t * h * w
+                    
+                    # Temporal: constant for the entire image
+                    img_temporal = torch.full((num_tokens,), curr_pos, device=device, dtype=torch.long)
+                    
+                    # Height: repeats each row index W times
+                    img_height = torch.arange(curr_pos, curr_pos + h, device=device).repeat_interleave(w)
+                    
+                    # Width: cycles [0, 1, ..., W-1] for each row
+                    img_width = torch.arange(curr_pos, curr_pos + w, device=device).repeat(h)
+                    
+                    temporal_list.append(img_temporal)
+                    height_list.append(img_height)
+                    width_list.append(img_width)
+                    
+                    curr_pos += max(h, w)  # Advance position by max dimension
+                
+                # 4. <image_end> token
+                temporal_list.append(torch.tensor([curr_pos], device=device))
+                height_list.append(torch.tensor([curr_pos], device=device))
+                width_list.append(torch.tensor([curr_pos], device=device))
+            else:
+                # No images, just text
+                seq_len = len(curr_input_ids)
+                text_pos = torch.arange(curr_pos, curr_pos + seq_len, device=device)
+                temporal_list.append(text_pos)
+                height_list.append(text_pos)
+                width_list.append(text_pos)
+            
+            # Concatenate all segments
+            full_temporal = torch.cat(temporal_list, dim=0)
+            full_height = torch.cat(height_list, dim=0)
+            full_width = torch.cat(width_list, dim=0)
+            
+            # Place in padded position_ids (respecting left padding)
+            position_ids[0, i, start_idx:] = full_temporal
+            position_ids[1, i, start_idx:] = full_height
+            position_ids[2, i, start_idx:] = full_width
+        
+        # ================================================================
         # Step 3: Forward pass and compute loss
         # ================================================================
         
-        # The model's embed_tokens can handle both text and image token IDs
-        # because the vocabulary is designed with image tokens at positions 0-16383
-        
-        # IMPORTANT: The model computes position_ids internally based on:
-        # - image_grid_thw: for 3D spatial RoPE on image tokens
-        # - attention_mask: for determining sequence structure
-        
-        # For training, we use input_ids directly (not inputs_embeds)
-        # The model will handle embedding lookup
+        # Now we pass manually computed position_ids to bypass get_rope_index
+        # which doesn't handle training scenarios with all image tokens present
         
         outputs = self.model(
             input_ids=padded_input_ids,
             attention_mask=padded_attention_mask,
+            position_ids=position_ids,
             image_grid_thw=image_grid_thw,
             images_per_sample=torch.full((batch_size,), grids_per_sample, dtype=torch.long, device=device),
             labels=padded_labels,
@@ -1039,6 +1130,8 @@ def parse_args():
                         choices=["t2i", "i2i"])
     parser.add_argument("--local_data_dir", type=str, default=None,
                         help="Path to local dataset (optional)")
+    parser.add_argument("--cache_dir", type=str, default=None,
+                        help="Directory to cache downloaded datasets (default: finetune/data/)")
     
     # Training
     parser.add_argument("--learning_rate", type=float, default=1e-4)
@@ -1105,6 +1198,7 @@ def main():
         resolution=args.resolution,
         task_type=args.task_type,
         local_data_dir=args.local_data_dir,
+        cache_dir=args.cache_dir,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         num_epochs=args.num_epochs,
