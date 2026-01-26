@@ -108,11 +108,16 @@ class TrainingConfig:
     torch_dtype: str = "bfloat16"  # "float32", "float16", "bfloat16"
     
     # LoRA configuration
-    lora_rank: int = 8
-    lora_alpha: int = 16
+    # For image generation AR models, higher rank is recommended (32-128)
+    # MLP layers (gate_up_proj, down_proj) are crucial for learning visual styles
+    lora_rank: int = 32
+    lora_alpha: int = 64  # Typically 2x rank for stable training
     lora_dropout: float = 0.05
     lora_target_modules: List[str] = field(default_factory=lambda: [
-        "q_proj", "k_proj", "v_proj", "o_proj"
+        # Attention layers - affect spatial composition and layout
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        # MLP layers - crucial for learning visual styles, textures, and details
+        "gate_up_proj", "down_proj",
     ])
     lora_modules_to_save: Optional[List[str]] = None
     
@@ -132,8 +137,10 @@ class TrainingConfig:
     learning_rate: float = 1e-4
     weight_decay: float = 0.01
     num_epochs: int = 5
-    batch_size: int = 1
-    gradient_accumulation_steps: int = 4
+    # Batch size: increase for better GPU utilization (requires more VRAM)
+    # Effective batch size = batch_size * gradient_accumulation_steps
+    batch_size: int = 2  # Increase if GPU memory allows
+    gradient_accumulation_steps: int = 2  # Reduce if batch_size increased
     warmup_steps: int = 100
     max_grad_norm: float = 1.0
     
@@ -1115,14 +1122,14 @@ def parse_args():
                         choices=["float32", "float16", "bfloat16"])
     
     # LoRA
-    parser.add_argument("--lora_rank", type=int, default=8,
-                        help="LoRA rank (r)")
-    parser.add_argument("--lora_alpha", type=int, default=16,
-                        help="LoRA alpha scaling factor")
+    parser.add_argument("--lora_rank", type=int, default=32,
+                        help="LoRA rank (r). For image generation, 32-128 recommended")
+    parser.add_argument("--lora_alpha", type=int, default=64,
+                        help="LoRA alpha scaling factor. Typically 2x rank")
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--lora_target_modules", nargs="+",
-                        default=["q_proj", "k_proj", "v_proj", "o_proj"],
-                        help="Modules to apply LoRA to")
+                        default=["q_proj", "k_proj", "v_proj", "o_proj", "gate_up_proj", "down_proj"],
+                        help="Modules to apply LoRA to. Include MLP layers for better style learning")
     
     # Dataset
     parser.add_argument("--dataset_subset", type=str, default="data_1024_10K",
@@ -1139,8 +1146,10 @@ def parse_args():
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--num_epochs", type=int, default=5)
-    parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=2,
+                        help="Per-GPU batch size. Increase for better GPU utilization (requires more VRAM)")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=2,
+                        help="Gradient accumulation steps. Effective batch = batch_size * accumulation")
     parser.add_argument("--warmup_steps", type=int, default=100)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     

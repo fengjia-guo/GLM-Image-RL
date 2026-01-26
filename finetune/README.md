@@ -248,20 +248,221 @@ pip install git+https://github.com/huggingface/diffusers.git
 pip install peft
 ```
 
+## LoRA Hyperparameter Guide
+
+Choosing the right LoRA parameters is **critical for image generation quality**. Unlike text-based LLMs, image generation AR models require more capacity to learn visual patterns.
+
+### Rank Selection
+
+| Rank   | Trainable Params | Use Case                     | Notes                    |
+| ------ | ---------------- | ---------------------------- | ------------------------ |
+| 8      | ~8M              | Testing/debugging            | Too small for production |
+| 16     | ~16M             | Light style tuning           | Minimal capacity         |
+| **32** | ~32M             | **Recommended baseline**     | Good balance             |
+| 64     | ~64M             | Strong style adaptation      | Better for domain shift  |
+| 128    | ~130M            | Full fine-tuning alternative | Maximum expressiveness   |
+
+**Recommendation**: Start with **rank=32** for image generation. Increase to 64-128 if:
+
+- Training on very different visual domain (e.g., medical images, anime)
+- Learning complex new styles or concepts
+- Loss plateaus but quality still unsatisfactory
+
+### Alpha Selection
+
+The `alpha/rank` ratio controls the **effective learning rate** of LoRA:
+
+| Alpha            | Effect                                | Stability       |
+| ---------------- | ------------------------------------- | --------------- |
+| `alpha = rank`   | Standard adaptation                   | Very stable     |
+| `alpha = 2*rank` | **Recommended** - Stronger adaptation | Stable          |
+| `alpha = 4*rank` | Aggressive adaptation                 | May be unstable |
+
+**Formula**: `effective_lr = lr * (alpha / rank)`
+
+With `alpha = 2*rank`, you get 2x the effective learning rate, allowing faster adaptation without destabilizing training.
+
+### Target Module Selection
+
+This is the **most important decision** for image generation finetuning.
+
+#### Attention Layers (`q_proj`, `k_proj`, `v_proj`, `o_proj`)
+
+| Aspect            | Impact                                                          |
+| ----------------- | --------------------------------------------------------------- |
+| **Function**      | Controls how tokens attend to each other                        |
+| **Visual Effect** | Affects composition, spatial layout, object relationships       |
+| **Best For**      | Compositional changes, spatial arrangement, multi-object scenes |
+| **Parameters**    | ~4 matrices per layer                                           |
+
+#### MLP Layers (`gate_up_proj`, `down_proj`)
+
+| Aspect            | Impact                                                |
+| ----------------- | ----------------------------------------------------- |
+| **Function**      | Feature transformation, stores "knowledge"            |
+| **Visual Effect** | Affects style, texture, color palette, fine details   |
+| **Best For**      | **Style transfer, domain adaptation, visual quality** |
+| **Parameters**    | ~3 matrices per layer (larger than attention!)        |
+
+#### Comparison
+
+| Target                 | Params (rank=32) | Best For            | Image Quality Impact |
+| ---------------------- | ---------------- | ------------------- | -------------------- |
+| Attention only         | ~32M             | Layout, composition | Medium               |
+| MLP only               | ~48M             | Style, textures     | High                 |
+| **Both (recommended)** | ~80M             | Full adaptation     | **Highest**          |
+
+### Recommended Configurations
+
+#### 🎯 Default (Balanced)
+
+```bash
+python finetune_lora.py \
+    --lora_rank 32 \
+    --lora_alpha 64 \
+    --lora_target_modules q_proj k_proj v_proj o_proj gate_up_proj down_proj
+```
+
+- **Trainable params**: ~80M (0.9% of 9B model)
+- **Use case**: General finetuning, style adaptation
+
+#### 💾 Memory-Constrained
+
+```bash
+python finetune_lora.py \
+    --lora_rank 16 \
+    --lora_alpha 32 \
+    --lora_target_modules q_proj v_proj gate_up_proj down_proj
+```
+
+- **Trainable params**: ~32M
+- **Use case**: Limited GPU memory, faster experimentation
+
+#### 🎨 Style-Focused (Best for visual quality)
+
+```bash
+python finetune_lora.py \
+    --lora_rank 64 \
+    --lora_alpha 128 \
+    --lora_target_modules q_proj k_proj v_proj o_proj gate_up_proj down_proj
+```
+
+- **Trainable params**: ~160M
+- **Use case**: Strong style adaptation, domain transfer
+
+#### 🔬 Maximum Capacity
+
+```bash
+python finetune_lora.py \
+    --lora_rank 128 \
+    --lora_alpha 256 \
+    --lora_target_modules q_proj k_proj v_proj o_proj gate_up_proj down_proj
+```
+
+- **Trainable params**: ~320M (~3.5% of model)
+- **Use case**: Near full finetuning, maximum adaptation
+
+### Why MLP Matters for Image Generation
+
+Research from Stable Diffusion LoRA training shows that **MLP layers are crucial for learning visual styles**:
+
+1. **Style is stored in MLP**: Visual patterns, color palettes, and textures are encoded in MLP weights
+2. **Attention handles structure**: Spatial relationships and composition are managed by attention
+3. **Combined effect**: Training both gives the best results for most use cases
+
+```
+Text Prompt → [Attention: WHERE to place things]
+           → [MLP: WHAT things look like]
+           → Visual Tokens
+```
+
+### Quick Reference
+
+| Scenario     | Rank   | Alpha  | Modules      | Params  |
+| ------------ | ------ | ------ | ------------ | ------- |
+| Quick test   | 8      | 16     | attn only    | 8M      |
+| Light tuning | 16     | 32     | attn+mlp     | 40M     |
+| **Standard** | **32** | **64** | **attn+mlp** | **80M** |
+| Strong style | 64     | 128    | attn+mlp     | 160M    |
+| Maximum      | 128    | 256    | attn+mlp     | 320M    |
+
+## Batch Size & Training Efficiency
+
+### Understanding Batch Size vs Gradient Accumulation
+
+```
+Effective Batch Size = batch_size × gradient_accumulation_steps
+```
+
+| Method                    | GPU Utilization | Memory Usage | Speed           |
+| ------------------------- | --------------- | ------------ | --------------- |
+| batch_size=1, accum=4     | Low ❌          | Minimal      | Slow            |
+| **batch_size=2, accum=2** | Medium ✅       | Moderate     | **Recommended** |
+| batch_size=4, accum=1     | High ✅         | High         | Fast            |
+| batch_size=8, accum=1     | Maximum ✅      | Very High    | Fastest         |
+
+**Key Insight**: Same effective batch size, but **real batch_size > 1 trains faster** because:
+
+- GPU parallel computation is better utilized
+- Gradient accumulation only simulates large batch gradients
+- Memory bandwidth is used more efficiently
+
+### Recommended Configurations by GPU
+
+| GPU           | VRAM  | batch_size | accum | Effective | Notes          |
+| ------------- | ----- | ---------- | ----- | --------- | -------------- |
+| RTX 3090/4090 | 24GB  | 1          | 4     | 4         | Limited VRAM   |
+| A100 40GB     | 40GB  | 2          | 2     | 4         | Default        |
+| **A100 80GB** | 80GB  | **4**      | **1** | **4**     | **Optimal**    |
+| Multi-GPU     | 80GB+ | 4-8        | 1     | 4-8/GPU   | Use accelerate |
+
+### Example Commands
+
+```bash
+# Default (A100 40GB or similar)
+python finetune_lora.py \
+    --batch_size 2 \
+    --gradient_accumulation_steps 2
+
+# High-memory GPU (A100 80GB)
+python finetune_lora.py \
+    --batch_size 4 \
+    --gradient_accumulation_steps 1
+
+# Low-memory GPU (RTX 3090/4090)
+python finetune_lora.py \
+    --batch_size 1 \
+    --gradient_accumulation_steps 4
+
+# Maximum throughput (multi-GPU with accelerate)
+accelerate launch finetune_lora.py \
+    --batch_size 4 \
+    --gradient_accumulation_steps 1
+```
+
+### Memory Optimization Tips
+
+If you encounter OOM (Out of Memory) errors:
+
+1. **Reduce batch_size first**, then increase gradient_accumulation
+2. **Enable gradient checkpointing** (enabled by default): `--gradient_checkpointing`
+3. **Use bf16 mixed precision** (default): `--mixed_precision bf16`
+4. **Use 8-bit Adam**: `--use_8bit_adam` (requires bitsandbytes)
+
 ## Quick Start
 
 > **Note**: Full implementation is under active development. The following shows the intended usage pattern.
 
 ```python
-# Basic T2I finetuning example (planned)
+# Basic T2I finetuning example
 from finetune_lora import GlmImageLoraTrainer
 
 trainer = GlmImageLoraTrainer(
     model_path="zai-org/GLM-Image",
     task_type="t2i",
-    lora_rank=8,
-    lora_alpha=16,
-    target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+    lora_rank=32,
+    lora_alpha=64,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_up_proj", "down_proj"],
 )
 
 trainer.train(
