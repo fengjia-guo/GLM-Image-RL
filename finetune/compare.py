@@ -223,11 +223,11 @@ def create_comparison_grid(
         font_small = ImageFont.truetype(
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12
         )
-    except:
+    except Exception as e:
         try:
             font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 16)
             font_small = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 12)
-        except:
+        except Exception as e:
             font = ImageFont.load_default()
             font_small = font
 
