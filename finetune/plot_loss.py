@@ -137,7 +137,7 @@ def plot_loss(
                 transform=axes[0].transAxes,
                 verticalalignment='bottom',
                 horizontalalignment='left',
-                fontsize=9,
+                fontsize=7,
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
             )
             
