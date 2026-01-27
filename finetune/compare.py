@@ -32,7 +32,6 @@ Usage:
 import argparse
 import logging
 import os
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -220,16 +219,11 @@ def create_comparison_grid(
     # Try to load a nice font, fall back to default
     try:
         font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 16)
-        font_small = ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12
-        )
     except Exception as e:
         try:
             font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 16)
-            font_small = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 12)
         except Exception as e:
             font = ImageFont.load_default()
-            font_small = font
 
     # Draw prompt at top
     prompt_text = f"Prompt: {prompt}"
