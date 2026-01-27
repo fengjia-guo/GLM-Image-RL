@@ -61,15 +61,12 @@ Requirements:
 
 import json
 import logging
-import math
 import os
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 # Training utilities
@@ -84,7 +81,6 @@ try:
         LoraConfig,
         TaskType,
         get_peft_model,
-        prepare_model_for_kbit_training,
     )
 
     PEFT_AVAILABLE = True

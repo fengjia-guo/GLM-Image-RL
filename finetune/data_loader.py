@@ -17,9 +17,8 @@ Datasets:
 
 import json
 import os
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 from PIL import Image

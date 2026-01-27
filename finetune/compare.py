@@ -35,7 +35,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional
 
 import torch
 from PIL import Image, ImageDraw, ImageFont
