@@ -785,28 +785,42 @@ class HuggingFaceImageTextDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        try:
-            sample = self.dataset[idx]
-        except Exception as e:
-            print(f"Error loading sample {idx}: {e}")
-            return self.__getitem__((idx + 1) % len(self))
+        max_retries = 20
+        current_idx = idx
+        sample = None
+        image = None
 
-        # Get image
-        if self.image_col not in sample:
-            for col in ["image", "img", "jpg"]:
-                if col in sample:
-                    self.image_col = col
-                    break
-
-        image = sample.get(self.image_col)
-
-        if not isinstance(image, Image.Image):
+        for attempt in range(max_retries):
             try:
-                image = Image.open(image).convert("RGB")
-            except:
-                return self.__getitem__((idx + 1) % len(self))
-        else:
-            image = image.convert("RGB")
+                sample = self.dataset[current_idx]
+
+                # Get image
+                if self.image_col not in sample:
+                    for col in ["image", "img", "jpg"]:
+                        if col in sample:
+                            self.image_col = col
+                            break
+
+                image = sample.get(self.image_col)
+
+                if not isinstance(image, Image.Image):
+                    image = Image.open(image).convert("RGB")
+                else:
+                    image = image.convert("RGB")
+
+                # If success, break the retry loop
+                break
+            except Exception as e:
+                # If this was the last attempt, re-raise
+                if attempt == max_retries - 1:
+                    print(f"Error loading sample {current_idx} (final attempt): {e}")
+                    raise RuntimeError(
+                        f"Failed to load any valid samples after {max_retries} retries starting from index {idx}"
+                    ) from e
+
+                # Otherwise try next sample
+                # print(f"Error loading sample {current_idx}: {e}, trying next...")
+                current_idx = (current_idx + 1) % len(self)
 
         # Get prompt
         prompt = self.default_prompt

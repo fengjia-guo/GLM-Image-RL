@@ -204,8 +204,6 @@ def load_model_and_processor(config: TrainingConfig):
         model: GlmImageForConditionalGeneration
         processor: GlmImageProcessor
     """
-    import json
-
     from transformers import AutoProcessor, GlmImageForConditionalGeneration
 
     model_path = config.model_path
