@@ -51,6 +51,9 @@ def load_pipeline(model_path: str, lora_path: Optional[str] = None, device: str 
     """
     Load GLM-Image pipeline with optional LoRA weights.
     
+    The LoRA was trained on GlmImageForConditionalGeneration (transformers format),
+    so we need to load it the same way and then replace the component in the pipeline.
+    
     Args:
         model_path: Path to base GLM-Image model
         lora_path: Optional path to LoRA checkpoint
@@ -72,6 +75,7 @@ def load_pipeline(model_path: str, lora_path: Optional[str] = None, device: str 
     if lora_path:
         logging.info(f"Loading LoRA weights from {lora_path}")
         from peft import PeftModel
+        from transformers import GlmImageForConditionalGeneration
         
         # Check adapter files exist
         adapter_config = Path(lora_path) / "adapter_config.json"
@@ -85,18 +89,47 @@ def load_pipeline(model_path: str, lora_path: Optional[str] = None, device: str 
         logging.info(f"LoRA config: r={config.get('r')}, alpha={config.get('lora_alpha')}, "
                      f"target_modules={config.get('target_modules')}")
         
-        # Load LoRA into the vision_language_encoder
-        pipe.vision_language_encoder = PeftModel.from_pretrained(
-            pipe.vision_language_encoder,
-            lora_path,
+        # CRITICAL: LoRA was trained on GlmImageForConditionalGeneration, NOT on
+        # pipe.vision_language_encoder directly. The model structures differ:
+        # - Training: GlmImageForConditionalGeneration loaded from vision_language_encoder/
+        # - Pipeline: pipe.vision_language_encoder is the same model class
+        #
+        # But we need to load LoRA using the SAME loading path as training to ensure
+        # weight names match correctly.
+        
+        # Detect model format and load base model the same way as training
+        model_index_path = Path(model_path) / "model_index.json"
+        if model_index_path.exists():
+            # Diffusers format - load from vision_language_encoder subdirectory
+            model_subdir = Path(model_path) / "vision_language_encoder"
+            logging.info(f"Loading base model from {model_subdir} (diffusers format)")
+        else:
+            # Transformers format - load directly
+            model_subdir = model_path
+            logging.info(f"Loading base model from {model_subdir} (transformers format)")
+        
+        # Load the model the same way as during training
+        base_model = GlmImageForConditionalGeneration.from_pretrained(
+            model_subdir,
+            torch_dtype=torch.bfloat16,
+            device_map=None,
+            trust_remote_code=True,
         )
+        
+        # Apply LoRA weights
+        logging.info("Applying LoRA adapter...")
+        peft_model = PeftModel.from_pretrained(base_model, lora_path)
         
         if merge_lora:
             # Merge LoRA weights and unload for correct inference
             logging.info("Merging LoRA weights into base model...")
-            pipe.vision_language_encoder = pipe.vision_language_encoder.merge_and_unload()
+            merged_model = peft_model.merge_and_unload()
+            
+            # Replace the pipeline's vision_language_encoder with merged model
+            pipe.vision_language_encoder = merged_model
         else:
             logging.info("Using LoRA in adapter mode (not merged)")
+            pipe.vision_language_encoder = peft_model
     
     pipe = pipe.to(device)
     

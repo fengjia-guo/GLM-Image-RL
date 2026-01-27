@@ -1084,19 +1084,36 @@ def generate_with_lora(
     """
     from diffusers import GlmImagePipeline
     from peft import PeftModel
+    from transformers import GlmImageForConditionalGeneration
     
     # Load pipeline
     pipe = GlmImagePipeline.from_pretrained(
         model_path,
         torch_dtype=torch.bfloat16,
-        device_map="cuda",
     )
     
-    # Load LoRA weights into the vision_language_encoder
-    pipe.vision_language_encoder = PeftModel.from_pretrained(
-        pipe.vision_language_encoder,
-        lora_path,
+    # CRITICAL: LoRA was trained on GlmImageForConditionalGeneration, so we need to
+    # load it the same way to ensure weight names match correctly.
+    model_index_path = os.path.join(model_path, "model_index.json")
+    if os.path.exists(model_index_path):
+        model_subdir = os.path.join(model_path, "vision_language_encoder")
+    else:
+        model_subdir = model_path
+    
+    # Load base model and apply LoRA
+    base_model = GlmImageForConditionalGeneration.from_pretrained(
+        model_subdir,
+        torch_dtype=torch.bfloat16,
+        device_map=None,
+        trust_remote_code=True,
     )
+    
+    peft_model = PeftModel.from_pretrained(base_model, lora_path)
+    merged_model = peft_model.merge_and_unload()
+    
+    # Replace pipeline's encoder with merged model
+    pipe.vision_language_encoder = merged_model
+    pipe = pipe.to("cuda")
     
     # Generate
     default_kwargs = {
