@@ -133,10 +133,10 @@ def plot_loss(
             
             stats_text = f'Current: {final_loss:.4f}\nSmoothed: {final_smooth:.4f}\nMin: {min_loss:.4f} (step {min_step})'
             axes[0].text(
-                0.98, 0.98, stats_text,
+                0.02, 0.05, stats_text,
                 transform=axes[0].transAxes,
-                verticalalignment='top',
-                horizontalalignment='right',
+                verticalalignment='bottom',
+                horizontalalignment='left',
                 fontsize=9,
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
             )
