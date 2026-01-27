@@ -1191,8 +1191,8 @@ def parse_args():
                         help="Modules to apply LoRA to. Include MLP layers for better style learning")
     
     # Dataset
-    parser.add_argument("--dataset_subset", type=str, default="data_1024_10K",
-                        choices=["data_1024_10K", "data_512_2M"])
+    parser.add_argument("--dataset_subset", type=str, default="pokemon",
+                        help="Dataset to use: 'pokemon', 'pixel-art', 'chinese-landscape', 'line-art' or 'data_1024_10K'")
     parser.add_argument("--resolution", type=int, default=1024)
     parser.add_argument("--task_type", type=str, default="t2i",
                         choices=["t2i", "i2i"])

@@ -15,7 +15,7 @@ pip install -r requirement.txt
 ```bash
 python finetune_lora.py \
     --model_path /path/to/GLM-Image \
-    --dataset_subset data_1024_10K \
+    --dataset_subset pokemon \
     --output_dir ./outputs/glm-image-lora \
     --num_epochs 5 \
     --batch_size 4 \
@@ -28,7 +28,7 @@ python finetune_lora.py \
 python compare.py \
     --model_path /path/to/GLM-Image \
     --lora_path ./outputs/glm-image-lora/epoch-5 \
-    --prompt "A cat sitting on a windowsill"
+    --prompt "A cute dragon"
 ```
 
 ### 4. Visualize Training
@@ -102,10 +102,15 @@ Text Prompt → Tokenizer → input_ids → AR Model → logits
 
 ### Dataset Options
 
-| Subset | Resolution | Samples |
-|--------|------------|---------|
-| `data_1024_10K` | 1024×1024 | 10,000 |
-| `data_512_2M` | 512×512 | 2,000,000 |
+You can specify the dataset using `--dataset_subset`. We provide several style-specific datasets for quick demos:
+
+| Subset | Style | Samples | Description |
+|--------|-------|---------|-------------|
+| `pokemon` | 🐉 Anime | ~833 | **Default**. High quality Pokemon BLIP captions |
+| `pixel-art` | 👾 Pixel | ~6K | Pixel art characters and scenes |
+| `chinese-landscape` | ⛰️ Ink | ~1K | Traditional Chinese landscape painting |
+| `line-art` | ✏️ Sketch | ~1K | Black and white line drawings |
+| `data_1024_10K` | 📷 Photo | 10K | High-quality photorealistic images |
 
 ## Example Training Log
 

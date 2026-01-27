@@ -708,6 +708,141 @@ def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     return result
 
 
+
+# Map friendly names to HuggingFace dataset IDs and column names
+HF_DATASET_MAPPING = {
+    "pokemon": {
+        "id": "lambdalabs/pokemon-blip-captions",
+        "image_col": "image",
+        "text_col": "text",
+        "resolution": 512,
+    },
+    "pixel-art": {
+        "id": "fusing/pixel-art-v1",
+        "image_col": "image",
+        "text_col": "caption",
+        "resolution": 512,
+    },
+    "chinese-landscape": {
+        "id": "Linksoul/Chinese-Landscape-Painting",
+        "image_col": "image",
+        "text_col": "text", 
+        "default_prompt": "Traditional Chinese landscape ink painting",
+    },
+    "line-art": {
+        "id": "awacke1/Lineart_ControlNet_v1_1", 
+        "image_col": "image",
+        "text_col": "text", 
+        "default_prompt": "Line art drawing",
+    }
+}
+
+class HuggingFaceImageTextDataset(Dataset):
+    """
+    Generic wrapper for HuggingFace image-text datasets.
+    """
+    
+    def __init__(
+        self,
+        config: DatasetConfig,
+        dataset_id: str,
+        image_col: str = "image",
+        text_col: str = "text",
+        default_prompt: str = "",
+        transform: Optional[Callable] = None,
+        tokenizer: Optional[Any] = None,
+        split: str = "train",
+    ):
+        self.config = config
+        self.transform = transform
+        self.tokenizer = tokenizer
+        self.image_col = image_col
+        self.text_col = text_col
+        self.default_prompt = default_prompt
+        
+        if not HF_DATASETS_AVAILABLE:
+            raise ImportError(
+                "The 'datasets' library is required. "
+                "Install it with: pip install datasets"
+            )
+            
+        print(f"Loading HF dataset: {dataset_id}")
+        self.dataset = load_dataset(
+            dataset_id,
+            split=split,
+            cache_dir=self.config.cache_dir,
+            verification_mode="no_checks"
+        )
+        
+    def __len__(self) -> int:
+        return len(self.dataset)
+        
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        try:
+            sample = self.dataset[idx]
+        except Exception as e:
+            print(f"Error loading sample {idx}: {e}")
+            return self.__getitem__((idx + 1) % len(self))
+            
+        # Get image
+        if self.image_col not in sample:
+             for col in ["image", "img", "jpg"]:
+                 if col in sample:
+                     self.image_col = col
+                     break
+        
+        image = sample.get(self.image_col)
+        
+        if not isinstance(image, Image.Image):
+             try:
+                 image = Image.open(image).convert("RGB")
+             except:
+                 return self.__getitem__((idx + 1) % len(self))
+        else:
+            image = image.convert("RGB")
+            
+        # Get prompt
+        prompt = self.default_prompt
+        if self.text_col in sample and sample[self.text_col]:
+            prompt = str(sample[self.text_col])
+            
+        if self.config.add_prompt_prefix:
+            prompt = f"{self.config.add_prompt_prefix} {prompt}"
+            
+        # Apply transforms
+        if self.transform:
+            pixel_values = self.transform(image)
+        else:
+            pixel_values = self._default_transform(image)
+        
+        result = {
+            "image": pixel_values,
+            "prompt": prompt,
+        }
+        
+        if self.tokenizer:
+            tokens = self.tokenizer(
+                prompt,
+                max_length=self.config.max_prompt_length,
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
+            )
+            result["input_ids"] = tokens["input_ids"].squeeze(0)
+            result["attention_mask"] = tokens["attention_mask"].squeeze(0)
+            
+        return result
+
+    def _default_transform(self, image: Image.Image) -> torch.Tensor:
+        import torchvision.transforms as T
+        transforms = [
+            T.Resize(self.config.resolution, interpolation=T.InterpolationMode.BILINEAR),
+            T.CenterCrop(self.config.resolution) if self.config.center_crop else T.RandomCrop(self.config.resolution),
+            T.ToTensor(),
+            T.Normalize([0.5], [0.5]),
+        ]
+        return T.Compose(transforms)(image)
+
 def get_dataset(
     config: DatasetConfig,
     transform: Optional[Callable] = None,
@@ -715,14 +850,6 @@ def get_dataset(
 ) -> Dataset:
     """
     Factory function to get the appropriate dataset based on config.
-    
-    Args:
-        config: DatasetConfig instance
-        transform: Optional image transform
-        tokenizer: Optional text tokenizer
-    
-    Returns:
-        Configured dataset instance
     """
     if config.local_data_dir:
         # Use local dataset
@@ -741,6 +868,19 @@ def get_dataset(
                 tokenizer=tokenizer,
             )
     else:
+        # Check if subset is in HF_DATASET_MAPPING
+        if config.subset in HF_DATASET_MAPPING:
+            mapping = HF_DATASET_MAPPING[config.subset]
+            return HuggingFaceImageTextDataset(
+                config=config,
+                dataset_id=mapping["id"],
+                image_col=mapping.get("image_col", "image"),
+                text_col=mapping.get("text_col", "text"),
+                default_prompt=mapping.get("default_prompt", ""),
+                transform=transform,
+                tokenizer=tokenizer,
+            )
+
         # Use HuggingFace dataset
         if config.task_type == "t2i":
             return TextToImage2MDataset(
@@ -749,116 +889,43 @@ def get_dataset(
                 tokenizer=tokenizer,
             )
         elif config.task_type == "i2i":
-            # Use HQ-Edit dataset for I2I
             return HQEditDataset(
                 config=config,
                 transform=transform,
                 tokenizer=tokenizer,
             )
-    
-    raise ValueError(f"Unknown task_type: {config.task_type}")
-
-
-# ============================================================================
-# Example usage and testing
-# ============================================================================
+        else:
+            raise ValueError(f"Unknown task type: {config.task_type}")
 
 if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Test dataset loading")
-    parser.add_argument(
-        "--task_type",
-        type=str,
-        default="t2i",
-        choices=["t2i", "i2i"],
-        help="Task type: t2i (text-to-image) or i2i (image-to-image)"
-    )
-    parser.add_argument(
-        "--subset", 
-        type=str, 
-        default="data_1024_10K",
-        choices=["data_1024_10K", "data_512_2M"],
-        help="Dataset subset to use (T2I only)"
-    )
-    parser.add_argument(
-        "--streaming",
-        action="store_true",
-        default=False,
-        help="Use streaming mode (T2I only)"
-    )
-    parser.add_argument(
-        "--num_samples",
-        type=int,
-        default=5,
-        help="Number of samples to preview"
-    )
-    parser.add_argument(
-        "--cache_dir",
-        type=str,
-        default=None,
-        help="Directory to cache downloaded datasets (default: finetune/data)"
-    )
+    parser.add_argument("--subset", type=str, default="pokemon")
+    parser.add_argument("--streaming", action="store_true")
+    parser.add_argument("--task_type", type=str, default="t2i")
+    parser.add_argument("--num_samples", type=int, default=1)
+    parser.add_argument("--cache_dir", type=str, default=None,
+                        help="Directory to cache downloaded datasets (default: finetune/data)")
     args = parser.parse_args()
     
     if args.task_type == "t2i":
-        print(f"Loading T2I dataset: jackyhate/text-to-image-2M ({args.subset})")
-        print(f"Streaming mode: {args.streaming}")
+        print(f"Loading T2I dataset: {args.subset}")
         
         config = DatasetConfig(
             subset=args.subset,
             streaming=args.streaming,
-            resolution=1024 if args.subset == "data_1024_10K" else 512,
+            resolution=1024,
             task_type="t2i",
             cache_dir=args.cache_dir,
         )
         
-        print(f"Cache directory: {config.cache_dir}")
-        print("-" * 50)
-        
-        dataset = TextToImage2MDataset(config)
-        
-        print(f"Dataset size (estimated): {len(dataset)}")
-        print("-" * 50)
-        
-        print(f"\nPreviewing {args.num_samples} samples:")
-        for i, sample in enumerate(dataset.iterate()):
-            if i >= args.num_samples:
-                break
+        if args.subset in HF_DATASET_MAPPING:
+            config.resolution = HF_DATASET_MAPPING[args.subset].get("resolution", 512)
             
-            print(f"\nSample {i + 1}:")
-            print(f"  Image shape: {sample['image'].shape}")
-            print(f"  Prompt: {sample['prompt'][:100]}...")
-    
-    elif args.task_type == "i2i":
-        print("Loading I2I dataset: UCSC-VLAA/HQ-Edit")
-        
-        config = DatasetConfig(
-            resolution=1024,
-            task_type="i2i",
-            i2i_prompt_type="edit",
-            cache_dir=args.cache_dir,
-        )
-        
-        print(f"Cache directory: {config.cache_dir}")
-        print("-" * 50)
-        
-        dataset = HQEditDataset(config)
-        
+        dataset = get_dataset(config)
         print(f"Dataset size: {len(dataset)}")
-        print("-" * 50)
         
-        print(f"\nPreviewing {args.num_samples} samples:")
-        for i, sample in enumerate(dataset.iterate()):
-            if i >= args.num_samples:
-                break
-            
-            print(f"\nSample {i + 1}:")
-            print(f"  Source image shape: {sample['source_image'].shape}")
-            print(f"  Target image shape: {sample['target_image'].shape}")
-            print(f"  Edit instruction: {sample['edit_instruction'][:100]}...")
-            print(f"  Input description: {sample['input_description'][:80]}...")
-            print(f"  Output description: {sample['output_description'][:80]}...")
-    
-    print("\n" + "=" * 50)
-    print("Dataset loading test completed successfully!")
+        for i, sample in enumerate(DataLoader(dataset, batch_size=1)):
+            if i >= args.num_samples: break
+            print(f"Sample {i}: shape={sample['image'].shape}, prompt={sample['prompt'][0]}")
