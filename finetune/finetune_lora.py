@@ -939,9 +939,6 @@ class GlmImageLoraTrainer:
         )
         logging.info("=" * 50)
 
-        # Initialize tracking
-        total_loss = 0.0
-
         # Training loop
         for epoch in range(self.start_epoch, self.config.num_epochs):
             self.model.train()
