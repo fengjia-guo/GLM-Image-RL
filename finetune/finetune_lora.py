@@ -809,7 +809,6 @@ class GlmImageLoraTrainer:
             height_list = []
             width_list = []
 
-            prev_end = 0
             grid_offset = i * grids_per_sample  # Starting grid index for this sample
 
             if len(image_start_positions) > 0:
