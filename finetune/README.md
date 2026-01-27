@@ -48,12 +48,13 @@ python plot_loss.py --log_dir ./outputs/glm-image-lora --export loss_curve.png
 
 GLM-Image consists of two components:
 
-| Component | Parameters | Role | Trainable |
-|-----------|------------|------|-----------|
-| AR Model | 9B | Generates discrete image tokens from text | ✅ Yes (LoRA) |
-| Diffusion Decoder | 7B | Decodes tokens to pixels | ❌ Frozen |
+| Component         | Parameters | Role                                      | Trainable     |
+| ----------------- | ---------- | ----------------------------------------- | ------------- |
+| AR Model          | 9B         | Generates discrete image tokens from text | ✅ Yes (LoRA) |
+| Diffusion Decoder | 7B         | Decodes tokens to pixels                  | ❌ Frozen     |
 
 We apply LoRA to the AR model's attention and MLP layers:
+
 - `q_proj`, `k_proj`, `v_proj`, `o_proj` (attention)
 - `gate_up_proj`, `down_proj` (MLP)
 
@@ -71,46 +72,46 @@ Text Prompt → Tokenizer → input_ids → AR Model → logits
 
 ### Token Vocabulary
 
-| Token Range | Purpose |
-|-------------|---------|
-| 0-16383 | VQVAE codebook (image tokens) |
-| 16384 | `<image_start>` marker |
-| 16385 | `<image_end>` / EOS |
+| Token Range | Purpose                       |
+| ----------- | ----------------------------- |
+| 0-16383     | VQVAE codebook (image tokens) |
+| 16384       | `<image_start>` marker        |
+| 16385       | `<image_end>` / EOS           |
 
 ## Files
 
-| File | Description |
-|------|-------------|
-| `finetune_lora.py` | Main training script |
-| `data_loader.py` | Dataset loading utilities |
-| `compare.py` | Compare base vs LoRA model outputs |
-| `plot_loss.py` | Visualize training loss curves |
-| `debug_lora.py` | Debug LoRA checkpoint issues |
+| File               | Description                        |
+| ------------------ | ---------------------------------- |
+| `finetune_lora.py` | Main training script               |
+| `data_loader.py`   | Dataset loading utilities          |
+| `compare.py`       | Compare base vs LoRA model outputs |
+| `plot_loss.py`     | Visualize training loss curves     |
+| `debug_lora.py`    | Debug LoRA checkpoint issues       |
 
 ## Training Parameters
 
 ### Recommended Settings
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--lora_rank` | 32 | LoRA rank (8-128, higher = more capacity) |
-| `--lora_alpha` | 64 | Scaling factor (typically 2× rank) |
-| `--learning_rate` | 1e-4 | Learning rate |
-| `--batch_size` | 4 | Per-GPU batch size |
-| `--gradient_accumulation_steps` | 2 | Gradient accumulation |
-| `--num_epochs` | 5 | Number of training epochs |
+| Parameter                       | Default | Description                               |
+| ------------------------------- | ------- | ----------------------------------------- |
+| `--lora_rank`                   | 32      | LoRA rank (8-128, higher = more capacity) |
+| `--lora_alpha`                  | 64      | Scaling factor (typically 2× rank)        |
+| `--learning_rate`               | 1e-4    | Learning rate                             |
+| `--batch_size`                  | 4       | Per-GPU batch size                        |
+| `--gradient_accumulation_steps` | 2       | Gradient accumulation                     |
+| `--num_epochs`                  | 5       | Number of training epochs                 |
 
 ### Dataset Options
 
 You can specify the dataset using `--dataset_subset`. We provide several style-specific datasets for quick demos:
 
-| Subset | Style | Samples | Description |
-|--------|-------|---------|-------------|
-| `pokemon` | 🐉 Anime | ~833 | **Default**. High quality Pokemon BLIP captions |
-| `pixel-art` | 👾 Pixel | ~6K | Pixel art characters and scenes |
-| `chinese-landscape` | ⛰️ Ink | ~1K | Traditional Chinese landscape painting |
-| `line-art` | ✏️ Sketch | ~1K | Black and white line drawings |
-| `data_1024_10K` | 📷 Photo | 10K | High-quality photorealistic images |
+| Subset              | Style     | Samples | Description                                     |
+| ------------------- | --------- | ------- | ----------------------------------------------- |
+| `pokemon`           | 🐉 Anime  | ~833    | **Default**. High quality Pokemon BLIP captions |
+| `pixel-art`         | 👾 Pixel  | ~6K     | Pixel art characters and scenes                 |
+| `chinese-landscape` | ⛰️ Ink    | ~1K     | Traditional Chinese landscape painting          |
+| `line-art`          | ✏️ Sketch | ~1K     | Black and white line drawings                   |
+| `data_1024_10K`     | 📷 Photo  | 10K     | High-quality photorealistic images              |
 
 ## Example Training Log
 
@@ -214,9 +215,9 @@ python debug_lora.py \
 
 ## Hardware Requirements
 
-| Configuration | VRAM | Batch Size |
-|---------------|------|------------|
-| Single GPU (A100 80GB) | ~60GB | 4 |
-| Single GPU (A100 40GB) | ~35GB | 2 |
+| Configuration          | VRAM  | Batch Size |
+| ---------------------- | ----- | ---------- |
+| Single GPU (A100 80GB) | ~60GB | 4          |
+| Single GPU (A100 40GB) | ~35GB | 2          |
 
 Enable gradient checkpointing (default) to reduce memory usage.

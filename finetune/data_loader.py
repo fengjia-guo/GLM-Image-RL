@@ -712,7 +712,7 @@ def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
 # Map friendly names to HuggingFace dataset IDs and column names
 HF_DATASET_MAPPING = {
     "pokemon": {
-        "id": "lambdalabs/pokemon-blip-captions",
+        "id": "reach-vb/pokemon-blip-captions",
         "image_col": "image",
         "text_col": "text",
         "resolution": 512,
