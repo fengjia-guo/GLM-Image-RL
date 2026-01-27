@@ -23,7 +23,7 @@ accelerate>=0.25.0
 tqdm>=4.65.0
 tensorboard>=2.14.0
 wandb>=0.15.0  # Optional: for experiment tracking
-bitsandbytes
+bitsandbytes>=0.41.0
 
 # Visualization & Comparison
 matplotlib>=3.7.0
