@@ -7,7 +7,7 @@ This directory provides tools for finetuning GLM-Image using LoRA (Low-Rank Adap
 ### 1. Install Dependencies
 
 ```bash
-pip install -r requirement.txt
+pip install -r requirements.txt
 ```
 
 ### 2. Run Training
