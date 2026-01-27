@@ -408,6 +408,9 @@ class GlmImageLoraTrainer:
         self.global_step = 0
         self.start_epoch = 0
         
+        # Initialize loss history for plotting
+        self.loss_history = []
+        
         # Resume from checkpoint if specified
         if config.resume_from_checkpoint:
             self.load_checkpoint(config.resume_from_checkpoint)
@@ -421,6 +424,12 @@ class GlmImageLoraTrainer:
         )
         
         os.makedirs(self.config.output_dir, exist_ok=True)
+    
+    def _save_loss_history(self):
+        """Save loss history to JSON file for plot_loss.py."""
+        loss_file = os.path.join(self.config.output_dir, "loss_history.json")
+        with open(loss_file, "w") as f:
+            json.dump(self.loss_history, f, indent=2)
     
     def setup_dataset(self) -> DataLoader:
         """Setup training dataset and dataloader."""
@@ -915,16 +924,30 @@ class GlmImageLoraTrainer:
                 # Logging
                 if self.global_step % self.config.logging_steps == 0:
                     avg_loss = epoch_loss / num_batches
+                    current_lr = self.lr_scheduler.get_last_lr()[0]
+                    
+                    # Log to accelerator (TensorBoard)
                     self.accelerator.log(
                         {
                             "train/loss": loss.item(),
                             "train/avg_loss": avg_loss,
-                            "train/learning_rate": self.lr_scheduler.get_last_lr()[0],
+                            "train/learning_rate": current_lr,
                             "train/epoch": epoch,
                             "train/global_step": self.global_step,
                         },
                         step=self.global_step,
                     )
+                    
+                    # Save to loss history for plot_loss.py
+                    if self.accelerator.is_local_main_process:
+                        self.loss_history.append({
+                            "step": self.global_step,
+                            "loss": loss.item(),
+                            "avg_loss": avg_loss,
+                            "lr": current_lr,
+                            "epoch": epoch,
+                        })
+                        self._save_loss_history()
                 
                 # Save checkpoint
                 if self.global_step % self.config.save_steps == 0:
@@ -979,6 +1002,13 @@ class GlmImageLoraTrainer:
                 training_state = json.load(f)
             self.global_step = training_state.get("global_step", 0)
             self.start_epoch = training_state.get("epoch", 0)
+        
+        # Load existing loss history if available
+        loss_file = os.path.join(self.config.output_dir, "loss_history.json")
+        if os.path.exists(loss_file):
+            with open(loss_file, "r") as f:
+                self.loss_history = json.load(f)
+            logging.info(f"Loaded {len(self.loss_history)} loss history entries")
         
         # Load LoRA weights
         from peft import PeftModel
