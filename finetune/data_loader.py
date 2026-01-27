@@ -717,24 +717,6 @@ HF_DATASET_MAPPING = {
         "text_col": "text",
         "resolution": 512,
     },
-    "pixel-art": {
-        "id": "fusing/pixel-art-v1",
-        "image_col": "image",
-        "text_col": "caption",
-        "resolution": 512,
-    },
-    "chinese-landscape": {
-        "id": "Linksoul/Chinese-Landscape-Painting",
-        "image_col": "image",
-        "text_col": "text", 
-        "default_prompt": "Traditional Chinese landscape ink painting",
-    },
-    "line-art": {
-        "id": "awacke1/Lineart_ControlNet_v1_1", 
-        "image_col": "image",
-        "text_col": "text", 
-        "default_prompt": "Line art drawing",
-    }
 }
 
 class HuggingFaceImageTextDataset(Dataset):
