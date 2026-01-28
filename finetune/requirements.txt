@@ -1,0 +1,36 @@
+# GLM-Image Finetuning Requirements
+# ==================================
+
+# Core dependencies (install from source for latest features)
+# pip install git+https://github.com/huggingface/transformers.git
+# pip install git+https://github.com/huggingface/diffusers.git
+
+# PyTorch (install according to your CUDA version)
+# See: https://pytorch.org/get-started/locally/
+torch>=2.0.0
+torchvision>=0.15.0
+
+# PEFT for LoRA
+peft>=0.7.0
+
+# Data loading
+datasets>=2.14.0
+webdataset>=0.2.0
+Pillow>=9.0.0
+
+# Training utilities
+accelerate>=0.25.0
+tqdm>=4.65.0
+tensorboard>=2.14.0
+wandb>=0.15.0  # Optional: for experiment tracking
+bitsandbytes>=0.41.0
+
+# Visualization & Comparison
+matplotlib>=3.7.0
+
+# Distributed training (optional)
+# deepspeed>=0.12.0
+
+# Development
+numpy>=1.24.0
+scipy>=1.10.0
