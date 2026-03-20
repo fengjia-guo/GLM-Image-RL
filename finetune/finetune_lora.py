@@ -159,6 +159,11 @@ class TrainingConfig:
     eval_steps: int = 500
     resume_from_checkpoint: Optional[str] = None
 
+    # Experiment tracking
+    report_to: str = "tensorboard"  # "tensorboard", "wandb", or "all"
+    wandb_project: str = "glm-image-lora"
+    wandb_run_name: Optional[str] = None
+
     # Misc
     seed: int = 42
     num_workers: int = 4
@@ -380,10 +385,11 @@ class GlmImageLoraTrainer:
         set_seed(config.seed)
 
         # Initialize accelerator
+        log_with = config.report_to if config.report_to != "all" else ["tensorboard", "wandb"]
         self.accelerator = Accelerator(
             gradient_accumulation_steps=config.gradient_accumulation_steps,
             mixed_precision=config.mixed_precision,
-            log_with="tensorboard",
+            log_with=log_with,
             project_dir=config.output_dir,
         )
 
@@ -924,6 +930,19 @@ class GlmImageLoraTrainer:
 
     def train(self):
         """Main training loop."""
+        # Initialize experiment trackers (wandb / tensorboard)
+        tracker_init_kwargs = {}
+        if self.config.report_to in ("wandb", "all"):
+            wandb_kwargs = {"project": self.config.wandb_project}
+            if self.config.wandb_run_name:
+                wandb_kwargs["name"] = self.config.wandb_run_name
+            tracker_init_kwargs["wandb"] = wandb_kwargs
+        self.accelerator.init_trackers(
+            project_name=self.config.wandb_project,
+            config=self.config.__dict__,
+            init_kwargs=tracker_init_kwargs,
+        )
+
         logging.info("=" * 50)
         logging.info("Starting training...")
         logging.info(f"  Epochs: {self.config.num_epochs}")
@@ -986,7 +1005,7 @@ class GlmImageLoraTrainer:
                     avg_loss = epoch_loss / num_batches
                     current_lr = self.lr_scheduler.get_last_lr()[0]
 
-                    # Log to accelerator (TensorBoard)
+                    # Log to accelerator (TensorBoard / W&B)
                     self.accelerator.log(
                         {
                             "train/loss": loss.item(),
@@ -1026,6 +1045,7 @@ class GlmImageLoraTrainer:
 
         # Final save
         self.save_checkpoint("final")
+        self.accelerator.end_training()
         logging.info("Training completed!")
 
     def save_checkpoint(self, name: str):
@@ -1330,6 +1350,27 @@ def parse_args():
     parser.add_argument("--logging_steps", type=int, default=10)
     parser.add_argument("--resume_from_checkpoint", type=str, default=None)
 
+    # Experiment tracking
+    parser.add_argument(
+        "--report_to",
+        type=str,
+        default="tensorboard",
+        choices=["tensorboard", "wandb", "all"],
+        help="Logging backend: tensorboard, wandb, or all",
+    )
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default="glm-image-lora",
+        help="W&B project name (used when --report_to includes wandb)",
+    )
+    parser.add_argument(
+        "--wandb_run_name",
+        type=str,
+        default=None,
+        help="W&B run name (optional, auto-generated if not set)",
+    )
+
     # Misc
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=4)
@@ -1397,6 +1438,9 @@ def main():
         save_steps=args.save_steps,
         logging_steps=args.logging_steps,
         resume_from_checkpoint=args.resume_from_checkpoint,
+        report_to=args.report_to,
+        wandb_project=args.wandb_project,
+        wandb_run_name=args.wandb_run_name,
         seed=args.seed,
         num_workers=args.num_workers,
     )
