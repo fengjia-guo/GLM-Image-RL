@@ -53,6 +53,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, Sampler
+from rewards import build_reward_models
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -101,6 +102,10 @@ class GRPORolloutConfig:
     skip_decode: bool = False  # If True, skip the DiT+VAE decode (useful for
     # debugging or when only token-level rewards are
     # needed).
+    reward_models: str = ""  # Comma-separated reward model names, e.g. "hpsv3"
+    reward_device: Optional[str] = None
+    reward_service_url: str = ""
+    reward_clip_model: str = "openai/clip-vit-large-patch14"
 
     @property
     def dtype(self) -> torch.dtype:
@@ -244,6 +249,10 @@ class RolloutSample:
     # The random seed used for the AR model on this rollout.
     ar_seed: int = 0
 
+    # Optional reward details for this sample.
+    reward: Optional[float] = None
+    reward_breakdown: Optional[Dict[str, float]] = None
+
 
 @dataclass
 class GRPOGroup:
@@ -279,6 +288,7 @@ class GRPORolloutEngine:
         self.config = config
         self._setup_logging()
         self._load_model()
+        self._load_reward_models()
         self._build_dataloader()
 
     # ------------------------------------------------------------------
@@ -304,7 +314,6 @@ class GRPORolloutEngine:
             cfg.model_path,
             torch_dtype=cfg.dtype,
         )
-        # Keep references to sub-components for convenience
         self.ar_model = self.pipe.vision_language_encoder
         self.processor = self.pipe.processor
 
@@ -313,20 +322,26 @@ class GRPORolloutEngine:
             self.logger.info(f"Loading LoRA from {cfg.lora_path}")
             from peft import PeftModel
 
-            base_model = GlmImageForConditionalGeneration.from_pretrained(
+            model_for_lora = (
                 os.path.join(cfg.model_path, "vision_language_encoder")
-                if os.path.exists(
-                    os.path.join(cfg.model_path, "vision_language_encoder")
-                )
-                else cfg.model_path,
+                if os.path.exists(os.path.join(cfg.model_path, "vision_language_encoder"))
+                else cfg.model_path
+            )
+            base_model = GlmImageForConditionalGeneration.from_pretrained(
+                model_for_lora,
                 torch_dtype=cfg.dtype,
+                device_map=None,
+                trust_remote_code=True,
             )
             peft_model = PeftModel.from_pretrained(base_model, cfg.lora_path)
             merged = peft_model.merge_and_unload()
-            self.pipe.vision_language_encoder = merged
+
+            if self.pipe is not None:
+                self.pipe.vision_language_encoder = merged
             self.ar_model = merged
 
         self.pipe = self.pipe.to(cfg.device)
+        self.ar_model = self.ar_model.to(cfg.device)
         self.ar_model.eval()  # AR model in eval mode for sampling (no dropout)
         self.logger.info("Pipeline loaded.")
 
@@ -357,6 +372,56 @@ class GRPORolloutEngine:
             f"{len(self.batch_sampler)} batches of "
             f"{cfg.prompts_per_batch} prompts x {cfg.group_size} rollouts"
         )
+
+    def _load_reward_models(self) -> None:
+        cfg = self.config
+        reward_names = [name.strip() for name in cfg.reward_models.split(",") if name.strip()]
+        reward_device = cfg.reward_device or cfg.device
+        self.reward_models = build_reward_models(
+            reward_names=reward_names,
+            device=reward_device,
+            service_url=cfg.reward_service_url,
+            clip_model_name=cfg.reward_clip_model,
+            logger=self.logger,
+        )
+        if self.reward_models:
+            self.logger.info(
+                "Loaded reward models: %s",
+                ", ".join(model.name for model in self.reward_models),
+            )
+
+    def _score_group_rewards(self, group: GRPOGroup) -> None:
+        if not self.reward_models:
+            return
+
+        prompts = [group.prompt] * len(group.samples)
+        images = [sample.image for sample in group.samples]
+        if any(image is None for image in images):
+            raise ValueError(
+                "Reward scoring requires decoded images. "
+                "Disable --skip_decode when using --reward_models."
+            )
+
+        per_model_scores: List[torch.Tensor] = []
+        reward_names: List[str] = []
+        for reward_model in self.reward_models:
+            scores = reward_model.score_batch(prompts=prompts, images=images)
+            if scores.numel() != len(group.samples):
+                raise ValueError(
+                    f"Reward model '{reward_model.name}' returned {scores.numel()} "
+                    f"scores for {len(group.samples)} samples."
+                )
+            per_model_scores.append(scores.to(dtype=torch.float32, device="cpu"))
+            reward_names.append(reward_model.name)
+
+        score_matrix = torch.stack(per_model_scores, dim=0)  # [num_models, G]
+        group.rewards = score_matrix.mean(dim=0)
+        for s_idx, sample in enumerate(group.samples):
+            sample.reward = float(group.rewards[s_idx].item())
+            sample.reward_breakdown = {
+                reward_names[m_idx]: float(score_matrix[m_idx, s_idx].item())
+                for m_idx in range(len(reward_names))
+            }
 
     # ------------------------------------------------------------------
     # Core rollout
@@ -426,6 +491,7 @@ class GRPORolloutEngine:
                     )
                     group.samples.append(sample)
 
+                self._score_group_rewards(group)
                 groups.append(group)
 
             yield groups
@@ -539,6 +605,12 @@ class GRPORolloutEngine:
         """
         cfg = self.config
 
+        if self.pipe is None:
+            raise RuntimeError(
+                "Decoder not available: diffusers GLM-Image pipeline could not be loaded. "
+                "Run with --skip_decode (or install a diffusers version with GLM-Image)."
+            )
+
         result = self.pipe(
             prompt=prompt,
             height=height,
@@ -611,6 +683,25 @@ def main():
     parser.add_argument("--default_width", type=int, default=1024)
     parser.add_argument("--output_dir", type=str, default="./outputs/grpo")
     parser.add_argument("--skip_decode", action="store_true")
+    parser.add_argument(
+        "--reward_models",
+        type=str,
+        default="",
+        help="Comma-separated reward models (supports: hpsv3, clip_score)",
+    )
+    parser.add_argument("--reward_device", type=str, default=None)
+    parser.add_argument(
+        "--reward_service_url",
+        type=str,
+        default="",
+        help="Optional reward service URL, e.g. http://127.0.0.1:8009",
+    )
+    parser.add_argument(
+        "--reward_clip_model",
+        type=str,
+        default="openai/clip-vit-large-patch14",
+        help="Hugging Face CLIP model id used by clip_score reward",
+    )
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -629,6 +720,10 @@ def main():
         default_width=args.default_width,
         output_dir=args.output_dir,
         skip_decode=args.skip_decode,
+        reward_models=args.reward_models,
+        reward_device=args.reward_device,
+        reward_service_url=args.reward_service_url,
+        reward_clip_model=args.reward_clip_model,
         seed=args.seed,
     )
 
@@ -646,6 +741,16 @@ def main():
                 f"({group.height}x{group.width}), "
                 f"{len(group.samples)} samples"
             )
+            if group.rewards is not None:
+                for s_idx, sample in enumerate(group.samples):
+                    breakdown = sample.reward_breakdown or {}
+                    breakdown_text = ", ".join(
+                        f"{name}={value:.6f}" for name, value in breakdown.items()
+                    )
+                    logging.info(
+                        f"  Reward sample_{s_idx}: total={sample.reward:.6f}"
+                        + (f" ({breakdown_text})" if breakdown_text else "")
+                    )
 
             # Save images if decoded
             if not config.skip_decode:

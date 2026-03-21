@@ -27,6 +27,7 @@ bitsandbytes>=0.41.0
 
 # Visualization & Comparison
 matplotlib>=3.7.0
+hpsv3  # Optional: reward model for GRPO scoring; install in a separate env if transformers conflicts
 
 # Distributed training (optional)
 # deepspeed>=0.12.0

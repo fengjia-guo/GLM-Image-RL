@@ -83,10 +83,11 @@ Text Prompt → Tokenizer → input_ids → AR Model → logits
 | File               | Description                        |
 | ------------------ | ---------------------------------- |
 | `finetune_lora.py` | Main training script               |
+| `grpo_rollout.py`  | GRPO rollout + optional reward scoring |
 | `data_loader.py`   | Dataset loading utilities          |
 | `compare.py`       | Compare base vs LoRA model outputs |
 | `plot_loss.py`     | Visualize training loss curves     |
-| `debug_lora.py`    | Debug LoRA checkpoint issues       |
+| `rewards/`         | Reward model implementations (e.g. HPSv3) |
 
 ## Training Parameters
 
@@ -221,3 +222,44 @@ python debug_lora.py \
 | Single GPU (A100 40GB) | ~35GB | 2          |
 
 Enable gradient checkpointing (default) to reduce memory usage.
+
+## GRPO Reward Models
+
+Reward models are organized under `finetune/rewards/`.
+
+Current text-to-image reward models:
+- `hpsv3`
+- `clip_score`
+
+Example:
+
+```bash
+python grpo_rollout.py \
+    --model_path /path/to/GLM-Image \
+    --prompt_jsonl prompts.jsonl \
+    --group_size 4 \
+    --reward_models clip_score \
+    --reward_clip_model openai/clip-vit-large-patch14 \
+    --reward_device cuda \
+    --output_dir ./outputs/grpo
+```
+
+If `hpsv3` conflicts with your main `transformers` version, run it as a separate service.
+
+Start reward service (in an isolated env with `hpsv3` installed):
+
+```bash
+python rewards/hpsv3_service.py --host 127.0.0.1 --port 8009 --device cuda
+```
+
+Run rollout (main env):
+
+```bash
+python grpo_rollout.py \
+    --model_path /path/to/GLM-Image \
+    --prompt_jsonl prompts.jsonl \
+    --group_size 4 \
+    --reward_models hpsv3 \
+    --reward_service_url http://127.0.0.1:8009 \
+    --output_dir ./outputs/grpo
+```
