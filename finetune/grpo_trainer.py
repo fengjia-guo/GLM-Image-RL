@@ -196,6 +196,138 @@ def token_kl_divergence(
 
 
 # ---------------------------------------------------------------------------
+# 3D RoPE position_ids for teacher-forcing forward pass
+# ---------------------------------------------------------------------------
+
+
+def build_position_ids_for_teacher_forcing(
+    input_ids: torch.Tensor,
+    image_grid_thw: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor:
+    """
+    Build ``position_ids`` of shape ``[3, 1, seq_len]`` for 3D RoPE.
+
+    The model's ``get_rope_index`` is designed for auto-regressive generation
+    (incomplete image tokens). During teacher-forcing (all image tokens present),
+    it produces a size mismatch. This function manually constructs the correct
+    spatial position encoding following the same logic as ``finetune_lora.py``.
+
+    Parameters
+    ----------
+    input_ids : Tensor [1, seq_len]
+        Full token sequence (text prefix + generated image tokens).
+    image_grid_thw : Tensor [num_grids, 3]
+        Grid dimensions from ``apply_chat_template``. For T2I this is
+        ``[[t_large, h_large, w_large], [t_small, h_small, w_small]]``.
+    device : torch.device
+
+    Returns
+    -------
+    position_ids : Tensor [3, 1, seq_len]
+        (temporal, height, width) position encoding.
+    """
+    seq_len = input_ids.shape[-1]
+    ids = input_ids[0]  # [seq_len]
+
+    # Token ids for image boundaries
+    IMAGE_START = 16384
+    IMAGE_END = 16385
+
+    position_ids = torch.zeros(3, 1, seq_len, dtype=torch.long, device=device)
+
+    temporal_list = []
+    height_list = []
+    width_list = []
+
+    curr_pos = 0
+
+    # Find <image_start>
+    img_start_positions = (ids == IMAGE_START).nonzero(as_tuple=True)[0]
+
+    if len(img_start_positions) > 0:
+        img_start = img_start_positions[0].item()
+
+        # 1. Text tokens before <image_start>
+        text_len = img_start
+        if text_len > 0:
+            text_pos = torch.arange(curr_pos, curr_pos + text_len, device=device)
+            temporal_list.append(text_pos)
+            height_list.append(text_pos)
+            width_list.append(text_pos)
+            curr_pos += text_len
+
+        # 2. <image_start> token
+        temporal_list.append(torch.tensor([curr_pos], device=device))
+        height_list.append(torch.tensor([curr_pos], device=device))
+        width_list.append(torch.tensor([curr_pos], device=device))
+        curr_pos += 1
+
+        # 3. Image tokens — T2I generation order is [small] → [large],
+        #    but image_grid_thw is stored as [large, small].
+        #    Process grids in reverse order to match generation order.
+        num_grids = image_grid_thw.shape[0]
+        grid_indices = list(reversed(range(num_grids)))
+
+        for g in grid_indices:
+            t, h, w = image_grid_thw[g].tolist()
+            t, h, w = int(t), int(h), int(w)
+            num_tokens = t * h * w
+
+            # Temporal: constant across the entire grid
+            img_temporal = torch.full(
+                (num_tokens,), curr_pos, device=device, dtype=torch.long
+            )
+            # Height: repeat each row index w times
+            img_height = torch.arange(
+                curr_pos, curr_pos + h, device=device
+            ).repeat_interleave(w)
+            # Width: cycle [0..w-1] for each row
+            img_width = torch.arange(
+                curr_pos, curr_pos + w, device=device
+            ).repeat(h)
+
+            temporal_list.append(img_temporal)
+            height_list.append(img_height)
+            width_list.append(img_width)
+
+            curr_pos += max(h, w)
+
+        # 4. <image_end> / EOS token (if present in the sequence)
+        img_end_positions = (ids == IMAGE_END).nonzero(as_tuple=True)[0]
+        if len(img_end_positions) > 0:
+            temporal_list.append(torch.tensor([curr_pos], device=device))
+            height_list.append(torch.tensor([curr_pos], device=device))
+            width_list.append(torch.tensor([curr_pos], device=device))
+    else:
+        # Pure text (no images)
+        text_pos = torch.arange(seq_len, device=device)
+        temporal_list.append(text_pos)
+        height_list.append(text_pos)
+        width_list.append(text_pos)
+
+    full_temporal = torch.cat(temporal_list, dim=0)
+    full_height = torch.cat(height_list, dim=0)
+    full_width = torch.cat(width_list, dim=0)
+
+    # Pad or truncate to seq_len (should match, but be safe)
+    actual_len = full_temporal.shape[0]
+    if actual_len < seq_len:
+        # Pad with the last position value
+        pad_len = seq_len - actual_len
+        last_val = curr_pos
+        full_temporal = torch.cat([full_temporal, torch.full((pad_len,), last_val, device=device)])
+        full_height = torch.cat([full_height, torch.full((pad_len,), last_val, device=device)])
+        full_width = torch.cat([full_width, torch.full((pad_len,), last_val, device=device)])
+
+    position_ids[0, 0, :] = full_temporal[:seq_len]
+    position_ids[1, 0, :] = full_height[:seq_len]
+    position_ids[2, 0, :] = full_width[:seq_len]
+
+    return position_ids
+
+
+# ---------------------------------------------------------------------------
 # GRPO Loss
 # ---------------------------------------------------------------------------
 
@@ -288,10 +420,19 @@ class ReferenceModel:
         ).unsqueeze(0)
         attn_mask = torch.ones_like(full_ids)
 
+        image_grid_thw = inputs.get("image_grid_thw")
+        position_ids = build_position_ids_for_teacher_forcing(
+            full_ids, image_grid_thw, device
+        )
+
         outputs = self.model(
             input_ids=full_ids,
             attention_mask=attn_mask,
-            image_grid_thw=inputs.get("image_grid_thw"),
+            position_ids=position_ids,
+            image_grid_thw=image_grid_thw,
+            images_per_sample=torch.tensor(
+                [image_grid_thw.shape[0]], dtype=torch.long, device=device
+            ),
         )
 
         gen_len = generated_ids.shape[0]
@@ -339,10 +480,19 @@ def recompute_log_probs(
     ).unsqueeze(0)
     attn_mask = torch.ones_like(full_ids)
 
+    image_grid_thw = inputs.get("image_grid_thw")
+    position_ids = build_position_ids_for_teacher_forcing(
+        full_ids, image_grid_thw, device
+    )
+
     outputs = ar_model(
         input_ids=full_ids,
         attention_mask=attn_mask,
-        image_grid_thw=inputs.get("image_grid_thw"),
+        position_ids=position_ids,
+        image_grid_thw=image_grid_thw,
+        images_per_sample=torch.tensor(
+            [image_grid_thw.shape[0]], dtype=torch.long, device=device
+        ),
     )
 
     gen_len = generated_ids.shape[0]
@@ -594,30 +744,23 @@ class GRPOTrainer:
             )
 
     # ================================================================ #
-    #  Rollout phase                                                    #
+    #  Rollout helpers                                                  #
     # ================================================================ #
 
-    def _do_rollout_epoch(self) -> List[List[GRPOGroup]]:
-        """Run one full epoch of rollouts (eval mode, no grad)."""
-        unwrapped = self.accelerator.unwrap_model(self.ar_model)
-        unwrapped.eval()
-
-        # Ensure rollout engine uses the unwrapped model for .generate()
-        self.rollout_engine.ar_model = unwrapped
+    def _enter_rollout_mode(self):
+        """Switch AR model to eval mode and point rollout engine at it."""
+        self._unwrapped = self.accelerator.unwrap_model(self.ar_model)
+        self._unwrapped.eval()
+        self.rollout_engine.ar_model = self._unwrapped
         if self.rollout_engine.pipe is not None:
-            self.rollout_engine.pipe.vision_language_encoder = unwrapped
+            self.rollout_engine.pipe.vision_language_encoder = self._unwrapped
 
-        all_batches: List[List[GRPOGroup]] = []
-        for batch_groups in self.rollout_engine.rollout():
-            all_batches.append(batch_groups)
-
-        # Restore wrapped model
+    def _exit_rollout_mode(self):
+        """Restore wrapped model and switch back to train mode."""
         self.rollout_engine.ar_model = self.ar_model
         if self.rollout_engine.pipe is not None:
             self.rollout_engine.pipe.vision_language_encoder = self.ar_model
-
-        unwrapped.train()
-        return all_batches
+        self._unwrapped.train()
 
     # ================================================================ #
     #  Generated-ids cache                                              #
@@ -779,29 +922,27 @@ class GRPOTrainer:
             self.logger.info(f"{'='*60}")
 
             epoch_start = time.time()
-
-            # ── Phase 1: Rollout ───────────────────────────────────
-            self.logger.info("Phase 1: Rolling out samples...")
-            rollout_start = time.time()
-
             self.rollout_engine.config.seed = cfg.seed + epoch * 10000
             self.rollout_engine.batch_sampler.set_epoch(epoch)
-            all_batches = self._do_rollout_epoch()
-
-            rollout_time = time.time() - rollout_start
-            self.logger.info(
-                f"Rollout complete: {sum(len(b) for b in all_batches)} groups "
-                f"in {rollout_time:.1f}s"
-            )
-
-            # ── Phase 2: Ref log-probs + advantages ────────────────
-            self.logger.info(
-                "Phase 2: Computing reference log-probs & advantages..."
-            )
-            ref_start = time.time()
-
             device = self.accelerator.device
-            for batch_groups in all_batches:
+
+            epoch_stats: Dict[str, List[float]] = {
+                "policy_loss": [], "kl_loss": [], "total_loss": [],
+                "approx_kl": [], "clip_frac": [], "reward": [],
+                "advantage": [],
+            }
+            epoch_rollout_time = 0.0
+            epoch_ref_time = 0.0
+            epoch_update_time = 0.0
+            last_batch_groups = None
+
+            self._enter_rollout_mode()
+            for batch_groups in self.rollout_engine.rollout():
+                self._exit_rollout_mode()
+                last_batch_groups = batch_groups
+
+                # ── Ref log-probs + advantages for this batch ──────
+                t_ref = time.time()
                 for group in batch_groups:
                     if group.rewards is None:
                         self.logger.warning(
@@ -827,22 +968,12 @@ class GRPOTrainer:
                                 device=device,
                             )
                         )
+                epoch_ref_time += time.time() - t_ref
 
-            ref_time = time.time() - ref_start
-            self.logger.info(f"Reference log-probs computed in {ref_time:.1f}s")
+                # ── Phase 2: Policy update for this batch ──────────
+                t_upd = time.time()
+                self.ar_model.train()
 
-            # ── Phase 3: Policy updates ────────────────────────────
-            self.logger.info("Phase 3: Updating policy...")
-            update_start = time.time()
-            self.ar_model.train()
-
-            epoch_stats: Dict[str, List[float]] = {
-                "policy_loss": [], "kl_loss": [], "total_loss": [],
-                "approx_kl": [], "clip_frac": [], "reward": [],
-                "advantage": [],
-            }
-
-            for batch_groups in all_batches:
                 for group in batch_groups:
                     if group.advantages is None:
                         continue
@@ -853,7 +984,6 @@ class GRPOTrainer:
                             ref_lp = sample._ref_log_probs
                             gen_ids = sample._generated_ids
 
-                            # --- accumulate context ---
                             with self.accelerator.accumulate(self.ar_model):
                                 loss, stats = self._compute_sample_loss(
                                     group=group,
@@ -876,12 +1006,9 @@ class GRPOTrainer:
                                     self.lr_scheduler.step()
                                 self.optimizer.zero_grad()
 
-                            # Accelerate handles actual step counting
-                            # internally; we track our own for logging.
                             if self.accelerator.sync_gradients:
                                 self.global_step += 1
 
-                                # Logging
                                 if self.global_step % cfg.logging_steps == 0:
                                     lr = self.optimizer.param_groups[0]["lr"]
                                     log_metrics = {
@@ -911,7 +1038,6 @@ class GRPOTrainer:
                                         f"lr={lr:.2e}"
                                     )
 
-                                # Checkpoint
                                 if (
                                     cfg.save_steps > 0
                                     and self.global_step % cfg.save_steps == 0
@@ -920,7 +1046,6 @@ class GRPOTrainer:
                                         f"step-{self.global_step}"
                                     )
 
-                            # Collect stats (all processes)
                             for k in (
                                 "policy_loss", "kl_loss", "total_loss",
                                 "approx_kl", "clip_frac",
@@ -930,7 +1055,13 @@ class GRPOTrainer:
                                 epoch_stats["reward"].append(sample.reward)
                             epoch_stats["advantage"].append(adv)
 
-            update_time = time.time() - update_start
+                epoch_update_time += time.time() - t_upd
+
+                # Free batch memory and re-enter rollout mode for next batch
+                del batch_groups
+                self._enter_rollout_mode()
+
+            self._exit_rollout_mode()
             epoch_time = time.time() - epoch_start
 
             # ── Epoch summary ──────────────────────────────────────
@@ -945,9 +1076,8 @@ class GRPOTrainer:
                 "approx_kl": _safe_mean(epoch_stats["approx_kl"]),
                 "clip_frac": _safe_mean(epoch_stats["clip_frac"]),
                 "mean_reward": _safe_mean(epoch_stats["reward"]),
-                "rollout_time": rollout_time,
-                "ref_time": ref_time,
-                "update_time": update_time,
+                "ref_time": epoch_ref_time,
+                "update_time": epoch_update_time,
                 "epoch_time": epoch_time,
                 "global_step": self.global_step,
             }
@@ -961,16 +1091,14 @@ class GRPOTrainer:
             self.logger.info(f"  Approx KL: {summary['approx_kl']:.4f}")
             self.logger.info(f"  Clip fraction: {summary['clip_frac']:.2%}")
             self.logger.info(
-                f"  Time: rollout={rollout_time:.1f}s, "
-                f"ref={ref_time:.1f}s, "
-                f"update={update_time:.1f}s, "
+                f"  Time: ref={epoch_ref_time:.1f}s, "
+                f"update={epoch_update_time:.1f}s, "
                 f"total={epoch_time:.1f}s"
             )
 
-            # Epoch checkpoint + optional images
             self._save_checkpoint(f"epoch-{epoch + 1}")
-            if cfg.save_images and not cfg.skip_decode and all_batches:
-                self._save_epoch_images(epoch + 1, all_batches[-1])
+            if cfg.save_images and not cfg.skip_decode and last_batch_groups:
+                self._save_epoch_images(epoch + 1, last_batch_groups)
 
         # ── Finish ─────────────────────────────────────────────────
         self._save_checkpoint("final")
