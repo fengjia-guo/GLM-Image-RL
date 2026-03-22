@@ -735,16 +735,14 @@ class GRPOTrainer:
         self._prepare_with_accelerator()
 
         # ── Init trackers ──────────────────────────────────────────
-        tracker_init_kwargs = {}
-        if cfg.report_to in ("wandb", "all"):
-            wkwargs = {"project": cfg.wandb_project}
-            if cfg.wandb_run_name:
-                wkwargs["name"] = cfg.wandb_run_name
-            tracker_init_kwargs["wandb"] = wkwargs
+        tracker_config = {
+            k: v for k, v in cfg.__dict__.items()
+            if isinstance(v, (int, float, str, bool, type(None)))
+        }
+        tracker_config.pop("wandb_project")
         self.accelerator.init_trackers(
             project_name=cfg.wandb_project,
-            config=cfg.__dict__,
-            init_kwargs=tracker_init_kwargs,
+            config=tracker_config,
         )
 
         # ── Banner ─────────────────────────────────────────────────

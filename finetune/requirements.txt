@@ -12,6 +12,8 @@ torchvision>=0.15.0
 
 # PEFT for LoRA
 peft>=0.7.0
+# If conflicts with transformers, install the latest
+# git+https://github.com/huggingface/peft.git
 
 # Data loading
 datasets>=2.14.0
@@ -27,7 +29,9 @@ bitsandbytes>=0.41.0
 
 # Visualization & Comparison
 matplotlib>=3.7.0
-hpsv3  # Optional: reward model for GRPO scoring; install in a separate env if transformers conflicts
+
+# Optional: reward model for GRPO scoring; install in a separate env if transformers conflicts
+# hpsv3  
 
 # Distributed training (optional)
 # deepspeed>=0.12.0

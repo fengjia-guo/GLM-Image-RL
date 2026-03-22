@@ -210,3 +210,8 @@ __marimo__/
 # GLM-Image finetune data
 finetune/data/
 finetune/outputs/
+
+# training data
+logs/
+ckpts/
+wandb/
