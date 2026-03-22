@@ -246,6 +246,11 @@ class RolloutSample:
     # The decoded image (PIL or tensor).  None when `skip_decode=True`.
     image: Any = None
 
+    # Full generated token sequence (all AR-generated tokens, in order).
+    # Shape: [num_generated_tokens].  Stored for efficient re-use during
+    # GRPO training (avoids re-running generation with the same seed).
+    generated_ids: Optional[torch.Tensor] = None
+
     # The random seed used for the AR model on this rollout.
     ar_seed: int = 0
 
@@ -443,22 +448,25 @@ class GRPORolloutEngine:
         for batch_idx, prompt_batch in enumerate(self.dataloader):
             groups: List[GRPOGroup] = []
 
-            for item in prompt_batch:
+            for item_idx, item in enumerate(prompt_batch):
                 prompt = item["prompt"]
                 height = item["height"]
                 width = item["width"]
                 group = GRPOGroup(prompt=prompt, height=height, width=width)
 
-                # Fixed decoder seed for this prompt group
+                # Per-group decoder seed: all G rollouts within a group share
+                # the same decoder noise so visual differences are solely due
+                # to the AR encoder, but different groups get different seeds.
+                group_decoder_seed = cfg.decoder_seed + batch_idx * len(prompt_batch) + item_idx
                 decoder_generator = torch.Generator(device=device)
-                decoder_generator.manual_seed(cfg.decoder_seed)
+                decoder_generator.manual_seed(group_decoder_seed)
 
                 # ----- AR rollouts -----
                 for g_idx in range(cfg.group_size):
                     ar_seed = base_seed + batch_idx * cfg.group_size + g_idx
 
                     # Sample token sequence from the AR model
-                    token_ids_d32, token_ids_up, log_probs = (
+                    token_ids_d32, token_ids_up, log_probs, gen_ids = (
                         self._ar_sample_single(
                             prompt=prompt,
                             height=height,
@@ -480,12 +488,13 @@ class GRPORolloutEngine:
                         )
                         # Reset the decoder generator so every rollout in the
                         # group uses the *same* decoder noise.
-                        decoder_generator.manual_seed(cfg.decoder_seed)
+                        decoder_generator.manual_seed(group_decoder_seed)
 
                     sample = RolloutSample(
                         token_ids_d32=token_ids_d32,
                         token_ids_upsampled=token_ids_up,
                         log_probs=log_probs,
+                        generated_ids=gen_ids,
                         image=pil_image,
                         ar_seed=ar_seed,
                     )
@@ -507,7 +516,7 @@ class GRPORolloutEngine:
         width: int,
         seed: int,
         device: torch.device,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Run one AR rollout for a single prompt.
 
@@ -521,6 +530,8 @@ class GRPORolloutEngine:
         log_probs : Tensor [num_generated_tokens]
             Per-token log probabilities under the current policy for the
             *entire* generated sequence (small + large + EOS).
+        generated_ids : Tensor [num_generated_tokens]
+            Full generated token id sequence.
         """
         cfg = self.config
 
@@ -583,7 +594,7 @@ class GRPORolloutEngine:
         token_ids_up = F.interpolate(token_ids_up, scale_factor=2, mode="nearest")
         token_ids_up = token_ids_up.to(dtype=torch.long).view(-1)
 
-        return token_ids_d32, token_ids_up, log_probs
+        return token_ids_d32, token_ids_up, log_probs, generated_ids
 
     # ------------------------------------------------------------------
     # Deterministic decoder
