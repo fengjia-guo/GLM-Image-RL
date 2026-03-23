@@ -589,6 +589,12 @@ class GRPORolloutEngine:
         large_end = large_start + num_large_tokens
         token_ids_d32 = generated_ids[large_start:large_end]
 
+        if token_ids_d32.shape[0] < token_h * token_w:
+            # Apply padding to token_ids_d32 if necessary
+            # See https://github.com/zai-org/GLM-Image/issues/24
+            # This usually happens when the prompt is long
+            token_ids_d32 = torch.nn.functional.pad(token_ids_d32, (0, token_h * token_w - token_ids_d32.shape[0]))
+
         # Upsample to 2x for the DiT decoder
         token_ids_up = token_ids_d32.view(1, 1, token_h, token_w).float()
         token_ids_up = F.interpolate(token_ids_up, scale_factor=2, mode="nearest")
