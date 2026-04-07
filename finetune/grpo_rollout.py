@@ -44,15 +44,19 @@ Usage example (rollout only)
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+import requests
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, Sampler
+from PIL import Image
 from rewards import build_reward_models
 
 # ---------------------------------------------------------------------------
@@ -85,6 +89,8 @@ class GRPORolloutConfig:
     num_inference_steps: int = 50
     guidance_scale: float = 1.5
     decoder_seed: int = 42  # fixed across the group
+    decoder_service_url: str = ""
+    decoder_service_timeout: float = 1200.0
 
     # Batching
     # `prompts_per_batch` is the number of *distinct prompts* processed together.
@@ -308,32 +314,53 @@ class GRPORolloutEngine:
         self.logger = logging.getLogger(__name__)
 
     def _load_model(self) -> None:
-        """Load the full GLM-Image pipeline and optionally apply LoRA."""
-        from diffusers import GlmImagePipeline
+        """Load the AR model and processor, plus local decoder pipeline when needed."""
         from transformers import GlmImageForConditionalGeneration
 
         cfg = self.config
-        self.logger.info(f"Loading pipeline from {cfg.model_path} ...")
+        self.decoder_service_url = self._normalize_decoder_service_url(cfg.decoder_service_url)
+        self.pipe = None
 
-        self.pipe = GlmImagePipeline.from_pretrained(
-            cfg.model_path,
-            torch_dtype=cfg.dtype,
-        )
-        self.ar_model = self.pipe.vision_language_encoder
-        self.processor = self.pipe.processor
+        if self.decoder_service_url:
+            from transformers import GlmImageProcessor
+
+            self.logger.info(
+                "Loading AR model and processor from %s with decoder service %s ...",
+                cfg.model_path,
+                self.decoder_service_url,
+            )
+            self.processor = GlmImageProcessor.from_pretrained(
+                cfg.model_path,
+                subfolder="processor",
+                trust_remote_code=True,
+            )
+            self.ar_model = GlmImageForConditionalGeneration.from_pretrained(
+                cfg.model_path,
+                subfolder="vision_language_encoder",
+                torch_dtype=cfg.dtype,
+                device_map=None,
+                trust_remote_code=True,
+            )
+        else:
+            from diffusers import GlmImagePipeline
+
+            self.logger.info(f"Loading pipeline from {cfg.model_path} ...")
+
+            self.pipe = GlmImagePipeline.from_pretrained(
+                cfg.model_path,
+                torch_dtype=cfg.dtype,
+            )
+            self.ar_model = self.pipe.vision_language_encoder
+            self.processor = self.pipe.processor
 
         # Optionally load LoRA
         if cfg.lora_path:
             self.logger.info(f"Loading LoRA from {cfg.lora_path}")
             from peft import PeftModel
 
-            model_for_lora = (
-                os.path.join(cfg.model_path, "vision_language_encoder")
-                if os.path.exists(os.path.join(cfg.model_path, "vision_language_encoder"))
-                else cfg.model_path
-            )
             base_model = GlmImageForConditionalGeneration.from_pretrained(
-                model_for_lora,
+                cfg.model_path,
+                subfolder="vision_language_encoder",
                 torch_dtype=cfg.dtype,
                 device_map=None,
                 trust_remote_code=True,
@@ -345,7 +372,8 @@ class GRPORolloutEngine:
                 self.pipe.vision_language_encoder = merged
             self.ar_model = merged
 
-        self.pipe = self.pipe.to(cfg.device)
+        if self.pipe is not None:
+            self.pipe = self.pipe.to(cfg.device)
         self.ar_model = self.ar_model.to(cfg.device)
         self.ar_model.eval()  # AR model in eval mode for sampling (no dropout)
         self.logger.info("Pipeline loaded.")
@@ -483,6 +511,7 @@ class GRPORolloutEngine:
                             prompt=prompt,
                             height=height,
                             width=width,
+                            generated_ids=gen_ids,
                             prior_token_ids=token_ids_up.unsqueeze(0),
                             decoder_generator=decoder_generator,
                         )
@@ -611,6 +640,7 @@ class GRPORolloutEngine:
         prompt: str,
         height: int,
         width: int,
+        generated_ids: torch.Tensor,
         prior_token_ids: torch.Tensor,
         decoder_generator: torch.Generator,
     ):
@@ -621,6 +651,15 @@ class GRPORolloutEngine:
         and reset *after* so that all calls within a group are deterministic.
         """
         cfg = self.config
+
+        if self.decoder_service_url:
+            return self._decode_single_via_service(
+                prompt=prompt,
+                height=height,
+                width=width,
+                generated_ids=generated_ids,
+                decoder_generator=decoder_generator,
+            )
 
         if self.pipe is None:
             raise RuntimeError(
@@ -638,6 +677,61 @@ class GRPORolloutEngine:
             generator=decoder_generator,
         )
         return result.images[0]
+
+    def _decode_single_via_service(
+        self,
+        prompt: str,
+        height: int,
+        width: int,
+        generated_ids: torch.Tensor,
+        decoder_generator: torch.Generator,
+    ) -> Image.Image:
+        cfg = self.config
+        payload = {
+            "token_ids": [generated_ids.detach().to(dtype=torch.long, device="cpu").tolist()],
+            "prompt_context": {
+                "prompt": prompt,
+                "height": height,
+                "width": width,
+                "guidance_scale": cfg.guidance_scale,
+                "num_inference_steps": cfg.num_inference_steps,
+                "seed": int(decoder_generator.initial_seed()),
+            },
+        }
+        response = requests.post(
+            self.decoder_service_url,
+            json=payload,
+            timeout=cfg.decoder_service_timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+        images = data.get("images")
+        if images is None and "image" in data:
+            images = [data["image"]]
+        if not isinstance(images, list) or len(images) != 1:
+            raise ValueError(
+                f"Decoder service {self.decoder_service_url} returned invalid images payload."
+            )
+        return self._decode_base64_image(images[0])
+
+    @staticmethod
+    def _normalize_decoder_service_url(url: str) -> str:
+        normalized = str(url or "").strip()
+        if not normalized:
+            return ""
+        if "://" not in normalized:
+            normalized = f"http://{normalized}"
+        normalized = normalized.rstrip("/")
+        if not normalized.endswith("/decode"):
+            normalized = f"{normalized}/decode"
+        return normalized
+
+    @staticmethod
+    def _decode_base64_image(encoded_image: str) -> Image.Image:
+        image_bytes = base64.b64decode(encoded_image)
+        image = Image.open(io.BytesIO(image_bytes))
+        image.load()
+        return image
 
     # ------------------------------------------------------------------
     # Helpers (static)
@@ -696,6 +790,13 @@ def main():
     parser.add_argument("--num_inference_steps", type=int, default=50)
     parser.add_argument("--guidance_scale", type=float, default=1.5)
     parser.add_argument("--decoder_seed", type=int, default=42)
+    parser.add_argument(
+        "--decoder_service_url",
+        type=str,
+        default="",
+        help="Optional decoder service base URL or /decode endpoint, e.g. http://127.0.0.1:8012",
+    )
+    parser.add_argument("--decoder_service_timeout", type=float, default=1200.0)
     parser.add_argument("--default_height", type=int, default=1024)
     parser.add_argument("--default_width", type=int, default=1024)
     parser.add_argument("--output_dir", type=str, default="./outputs/grpo")
@@ -733,6 +834,8 @@ def main():
         num_inference_steps=args.num_inference_steps,
         guidance_scale=args.guidance_scale,
         decoder_seed=args.decoder_seed,
+        decoder_service_url=args.decoder_service_url,
+        decoder_service_timeout=args.decoder_service_timeout,
         default_height=args.default_height,
         default_width=args.default_width,
         output_dir=args.output_dir,

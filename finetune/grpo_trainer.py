@@ -107,6 +107,8 @@ class GRPOTrainingConfig:
     num_inference_steps: int = 50
     guidance_scale: float = 1.5
     decoder_seed: int = 42
+    decoder_service_url: str = ""
+    decoder_service_timeout: float = 1200.0
     default_height: int = 1024
     default_width: int = 1024
     skip_decode: bool = False
@@ -614,6 +616,8 @@ class GRPOTrainer:
             num_inference_steps=cfg.num_inference_steps,
             guidance_scale=cfg.guidance_scale,
             decoder_seed=cfg.decoder_seed,
+            decoder_service_url=cfg.decoder_service_url,
+            decoder_service_timeout=cfg.decoder_service_timeout,
             default_height=cfg.default_height,
             default_width=cfg.default_width,
             skip_decode=cfg.skip_decode,
@@ -1204,6 +1208,8 @@ def parse_args():
     p.add_argument("--num_inference_steps", type=int, default=50)
     p.add_argument("--guidance_scale", type=float, default=1.5)
     p.add_argument("--decoder_seed", type=int, default=42)
+    p.add_argument("--decoder_service_url", type=str, default="")
+    p.add_argument("--decoder_service_timeout", type=float, default=1200.0)
     p.add_argument("--default_height", type=int, default=1024)
     p.add_argument("--default_width", type=int, default=1024)
     p.add_argument("--skip_decode", action="store_true")
@@ -1276,6 +1282,8 @@ def main():
         num_inference_steps=args.num_inference_steps,
         guidance_scale=args.guidance_scale,
         decoder_seed=args.decoder_seed,
+        decoder_service_url=args.decoder_service_url,
+        decoder_service_timeout=args.decoder_service_timeout,
         default_height=args.default_height,
         default_width=args.default_width,
         skip_decode=args.skip_decode,
