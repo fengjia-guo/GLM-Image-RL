@@ -111,6 +111,7 @@ class GRPORolloutConfig:
     reward_models: str = ""  # Comma-separated reward model names, e.g. "hpsv3"
     reward_device: Optional[str] = None
     reward_service_url: str = ""
+    reward_service_timeout: float = 1200.0
     reward_clip_model: str = "openai/clip-vit-large-patch14"
 
     @property
@@ -414,6 +415,7 @@ class GRPORolloutEngine:
             reward_names=reward_names,
             device=reward_device,
             service_url=cfg.reward_service_url,
+            service_timeout=cfg.reward_service_timeout,
             clip_model_name=cfg.reward_clip_model,
             logger=self.logger,
         )
@@ -814,6 +816,7 @@ def main():
         default="",
         help="Optional reward service URL, e.g. http://127.0.0.1:8009",
     )
+    parser.add_argument("--reward_service_timeout", type=float, default=1200.0)
     parser.add_argument(
         "--reward_clip_model",
         type=str,
@@ -843,6 +846,7 @@ def main():
         reward_models=args.reward_models,
         reward_device=args.reward_device,
         reward_service_url=args.reward_service_url,
+        reward_service_timeout=args.reward_service_timeout,
         reward_clip_model=args.reward_clip_model,
         seed=args.seed,
     )

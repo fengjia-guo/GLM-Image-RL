@@ -117,6 +117,7 @@ class GRPOTrainingConfig:
     reward_models: str = "clip_score"
     reward_device: Optional[str] = None
     reward_service_url: str = ""
+    reward_service_timeout: float = 1200.0
     reward_clip_model: str = "openai/clip-vit-large-patch14"
 
     # ── GRPO hyper-parameters ──────────────────────────────────────────
@@ -624,6 +625,7 @@ class GRPOTrainer:
             reward_models=cfg.reward_models,
             reward_device=cfg.reward_device,
             reward_service_url=cfg.reward_service_url,
+            reward_service_timeout=cfg.reward_service_timeout,
             reward_clip_model=cfg.reward_clip_model,
             seed=cfg.seed,
             device=str(self.accelerator.device),
@@ -1218,6 +1220,7 @@ def parse_args():
     p.add_argument("--reward_models", type=str, default="clip_score")
     p.add_argument("--reward_device", type=str, default=None)
     p.add_argument("--reward_service_url", type=str, default="")
+    p.add_argument("--reward_service_timeout", type=float, default=1200.0)
     p.add_argument(
         "--reward_clip_model", type=str,
         default="openai/clip-vit-large-patch14",
@@ -1290,6 +1293,7 @@ def main():
         reward_models=args.reward_models,
         reward_device=args.reward_device,
         reward_service_url=args.reward_service_url,
+        reward_service_timeout=args.reward_service_timeout,
         reward_clip_model=args.reward_clip_model,
         clip_eps=args.clip_eps,
         kl_coef=args.kl_coef,
