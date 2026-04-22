@@ -161,7 +161,7 @@ class PromptDataset(Dataset):
                         f"Line {line_no}: height={h} and width={w} must be "
                         f"divisible by 32"
                     )
-                self.items.append({"prompt": obj["prompt"], "height": h, "width": w})
+                self.items.append({"prompt": obj["prompt"], "height": h, "width": w, "metadata": meta})
 
     def __len__(self) -> int:
         return len(self.items)
@@ -264,6 +264,9 @@ class RolloutSample:
     # Optional reward details for this sample.
     reward: Optional[float] = None
     reward_breakdown: Optional[Dict[str, float]] = None
+
+    # metadata (from data)
+    metadata: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -431,6 +434,7 @@ class GRPORolloutEngine:
 
         prompts = [group.prompt] * len(group.samples)
         images = [sample.image for sample in group.samples]
+        metadatas = [sample.metadata for sample in group.samples]
         if any(image is None for image in images):
             raise ValueError(
                 "Reward scoring requires decoded images. "
@@ -440,7 +444,7 @@ class GRPORolloutEngine:
         per_model_scores: List[torch.Tensor] = []
         reward_names: List[str] = []
         for reward_model in self.reward_models:
-            scores = reward_model.score_batch(prompts=prompts, images=images)
+            scores = reward_model.score_batch(prompts=prompts, images=images, metadatas=metadatas)
             if scores.numel() != len(group.samples):
                 raise ValueError(
                     f"Reward model '{reward_model.name}' returned {scores.numel()} "
@@ -482,6 +486,7 @@ class GRPORolloutEngine:
                 prompt = item["prompt"]
                 height = item["height"]
                 width = item["width"]
+                metadata = item.get("metadata", {})
                 group = GRPOGroup(prompt=prompt, height=height, width=width)
 
                 # Per-group decoder seed: all G rollouts within a group share
@@ -528,6 +533,7 @@ class GRPORolloutEngine:
                         generated_ids=gen_ids,
                         image=pil_image,
                         ar_seed=ar_seed,
+                        metadata=metadata,
                     )
                     group.samples.append(sample)
 

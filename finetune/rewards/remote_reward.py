@@ -25,22 +25,26 @@ class RemoteRewardModel(RewardModel):
         self.timeout = float(timeout)
         self.response_text = response_text
 
-    def score_batch(self, prompts: List[str], images: List[Any]) -> torch.Tensor:
-        if len(prompts) != len(images):
+    def score_batch(self, prompts: List[str], images: List[Any], metadatas: List[dict] = None) -> torch.Tensor:
+        if metadatas is None:
+            metadatas = [{} for _ in range(len(images))]
+
+        if len(prompts) != len(images) or len(prompts) != len(metadatas):
             raise ValueError(
-                f"prompts/images length mismatch: {len(prompts)} vs {len(images)}"
+                f"prompts/images/metadatas length mismatch: {len(prompts)} vs {len(images)} vs {len(metadatas)}"
             )
         if len(images) == 0:
             return torch.empty(0, dtype=torch.float32)
 
         scores = []
-        for prompt, image in zip(prompts, images):
+        for prompt, image, metadata in zip(prompts, images, metadatas):
             if image is None:
                 raise ValueError(f"{self.name} reward received None image.")
             payload = {
                 "prompt": prompt,
                 "response": self.response_text,
                 "generated_images": [self._encode_image(image)],
+                "metadata": metadata,
             }
             response = requests.post(
                 self.service_url,

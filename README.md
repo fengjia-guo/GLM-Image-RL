@@ -85,7 +85,7 @@ python grpo_rollout.py \
 
 ### Prompt Format
 
-One JSON object per line. `metadata` is optional (defaults to 1024×1024):
+One JSON object per line. `metadata` is optional (`"height"` and `width` defaults to 1024×1024, and `"metadata"` will be passed to remote reward model):
 
 ```jsonl
 {"prompt": "a cat sitting on a windowsill at sunset"}
@@ -178,7 +178,8 @@ python grpo_trainer.py \
 {
   "prompt": "a cat sitting on a windowsill",
   "response": "",
-  "generated_images": ["<base64-encoded PNG>"]
+  "generated_images": ["<base64-encoded PNG>"],
+  "metadata": [{}], // the same metadata as in the data, shared by a group
 }
 ```
 
